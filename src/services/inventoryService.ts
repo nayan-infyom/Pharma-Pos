@@ -1,114 +1,48 @@
-import { StockMovement, StockAdjustment } from '../types';
-import { initialStockMovements } from '../data/stockMovements';
-import { medicineService } from './medicineService';
+import { StockMovement, StockAdjustment, ExpiryRadarItem, Medicine } from '../types';
+import * as inventoryApi from '../api/inventory';
+import { Pagination } from '../api/client';
 
-const MOVEMENTS_STORAGE_KEY = 'pharmapos_movements_v1';
-const ADJUSTMENTS_STORAGE_KEY = 'pharmapos_adjustments_v1';
-
+/**
+ * Phase K batch 3: backed by the real API. Stock is server-authoritative —
+ * this adapter no longer computes previousStock/newStock/quantityChange
+ * locally, and no longer accepts medicineName/batchNumber/adjustedBy from
+ * the caller (the server derives all three from the medicine/batch/actor).
+ */
 class InventoryService {
-  private movements: StockMovement[];
-  private adjustments: StockAdjustment[];
-
-  constructor() {
-    const savedMov = localStorage.getItem(MOVEMENTS_STORAGE_KEY);
-    if (savedMov) {
-      try {
-        this.movements = JSON.parse(savedMov);
-      } catch (e) {
-        this.movements = initialStockMovements;
-      }
-    } else {
-      this.movements = initialStockMovements;
-      this.persistMovements();
-    }
-
-    const savedAdj = localStorage.getItem(ADJUSTMENTS_STORAGE_KEY);
-    if (savedAdj) {
-      try {
-        this.adjustments = JSON.parse(savedAdj);
-      } catch (e) {
-        this.adjustments = [];
-      }
-    } else {
-      this.adjustments = [];
-    }
+  /** Capped convenience for DashboardPage's "recent movements" widget — see medicineService's identical, already-flagged limitation. */
+  async getMovements(limit = 25): Promise<StockMovement[]> {
+    const { items } = await inventoryApi.listMovements({ limit });
+    return items;
   }
 
-  private persistMovements() {
-    localStorage.setItem(MOVEMENTS_STORAGE_KEY, JSON.stringify(this.movements));
+  async listMovements(params: inventoryApi.ListMovementsParams = {}): Promise<{ items: StockMovement[]; pagination: Pagination }> {
+    return inventoryApi.listMovements(params);
   }
 
-  private persistAdjustments() {
-    localStorage.setItem(ADJUSTMENTS_STORAGE_KEY, JSON.stringify(this.adjustments));
+  async listAdjustments(page = 1, limit = 25): Promise<{ items: StockAdjustment[]; pagination: Pagination }> {
+    return inventoryApi.listAdjustments(page, limit);
   }
 
-  async getMovements(): Promise<StockMovement[]> {
-    return [...this.movements];
+  /**
+   * Server derives medicineName/batchNumber from the medicine/batch record
+   * and adjustedBy from the authenticated actor — never trusted from the
+   * client (see server/src/services/inventoryService.ts). Returns the real
+   * created StockMovement.
+   */
+  async adjustStock(input: inventoryApi.AdjustStockRequest): Promise<StockMovement> {
+    return inventoryApi.adjustStock(input);
   }
 
-  async getAdjustments(): Promise<StockAdjustment[]> {
-    return [...this.adjustments];
+  async getExpiryRadar(
+    tier: 'critical' | 'near' | 'watchlist' | 'all' = 'all',
+    page = 1,
+    limit = 50
+  ): Promise<{ items: ExpiryRadarItem[]; pagination: Pagination }> {
+    return inventoryApi.getExpiryRadar(tier, page, limit);
   }
 
-  async recordMovement(movement: Omit<StockMovement, 'id' | 'date'>): Promise<StockMovement> {
-    const newMovement: StockMovement = {
-      ...movement,
-      id: `mov-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      date: new Date().toISOString()
-    };
-    this.movements.unshift(newMovement);
-    this.persistMovements();
-    return newMovement;
-  }
-
-  async adjustStock(adjustment: Omit<StockAdjustment, 'id' | 'date'>): Promise<StockAdjustment> {
-    const newAdjustment: StockAdjustment = {
-      ...adjustment,
-      id: `adj-${Date.now()}`,
-      date: new Date().toISOString()
-    };
-
-    const med = await medicineService.getById(adjustment.medicineId);
-    if (med) {
-      const batch = med.batches.find(b => b.id === adjustment.batchId);
-      const prevStock = batch ? batch.quantity : 0;
-      let qtyChange = 0;
-      let newStock = prevStock;
-
-      if (adjustment.adjustmentType === 'Add Stock') {
-        qtyChange = adjustment.quantity;
-        newStock = prevStock + adjustment.quantity;
-        await medicineService.addStock(adjustment.medicineId, adjustment.batchId, adjustment.quantity);
-      } else if (adjustment.adjustmentType === 'Subtract Stock' || adjustment.adjustmentType === 'Mark Damaged' || adjustment.adjustmentType === 'Mark Expired') {
-        qtyChange = -adjustment.quantity;
-        newStock = Math.max(0, prevStock - adjustment.quantity);
-        await medicineService.deductStock(adjustment.medicineId, adjustment.batchId, adjustment.quantity);
-      } else if (adjustment.adjustmentType === 'Set Stock (Audit)') {
-        qtyChange = adjustment.quantity - prevStock;
-        newStock = adjustment.quantity;
-        if (batch) {
-          batch.quantity = adjustment.quantity;
-          await medicineService.updateBatch(adjustment.medicineId, adjustment.batchId, { quantity: adjustment.quantity });
-        }
-      }
-
-      await this.recordMovement({
-        medicineId: adjustment.medicineId,
-        medicineName: adjustment.medicineName,
-        batchNumber: adjustment.batchNumber,
-        type: adjustment.adjustmentType === 'Mark Expired' ? 'Expired' : (adjustment.adjustmentType === 'Mark Damaged' ? 'Damaged' : 'Adjustment'),
-        quantityChange: qtyChange,
-        previousStock: prevStock,
-        newStock,
-        user: adjustment.adjustedBy,
-        referenceId: newAdjustment.id,
-        notes: `${adjustment.reason} - ${adjustment.notes || ''}`
-      });
-    }
-
-    this.adjustments.unshift(newAdjustment);
-    this.persistAdjustments();
-    return newAdjustment;
+  async getLowStock(page = 1, limit = 25): Promise<{ items: Medicine[]; pagination: Pagination }> {
+    return inventoryApi.getLowStock(page, limit);
   }
 }
 

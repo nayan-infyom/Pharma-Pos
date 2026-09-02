@@ -1,93 +1,153 @@
 import React, { useState, useEffect } from 'react';
-import { salesService } from '../services/salesService';
-import { medicineService } from '../services/medicineService';
-import { expenseService } from '../services/expenseService';
-import { purchaseService } from '../services/purchaseService';
-import { SaleInvoice, Medicine, Expense, PurchaseOrder } from '../types';
+import { reportService } from '../services/reportService';
+import {
+  SalesSummaryReport,
+  ProfitAndLossReport,
+  GstReport,
+  CategoryDistributionItem,
+  MonthlyTrendItem,
+  TopMedicineItem
+} from '../types';
+import { ApiError } from '../api/client';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
 import { Tabs } from '../components/ui/Tabs';
-import { 
-  BarChart, 
-  Bar, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
-  ResponsiveContainer, 
-  PieChart, 
-  Pie, 
-  Cell, 
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
   Legend
 } from 'recharts';
-import { 
-  TrendingUp, 
-  Download, 
-  Boxes, 
+import {
+  TrendingUp,
+  Download,
+  Boxes,
   ShieldCheck,
-  IndianRupee
+  IndianRupee,
+  Loader2
 } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import { formatINR } from '../utils/formatters';
+
+const COLORS = ['#0f766e', '#0284c7', '#2563eb', '#7c3aed', '#d97706', '#db2777', '#475569'];
+const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function Loading() {
+  return <div className="p-10 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin" /></div>;
+}
+
+function LoadError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="p-6 text-center text-xs text-rose-600">
+      {message} <button className="underline font-semibold" onClick={onRetry}>Retry</button>
+    </div>
+  );
+}
 
 export const ReportsPage: React.FC = () => {
   const { addToast } = useAppStore();
   const [activeTab, setActiveTab] = useState<'sales' | 'pl' | 'gst' | 'velocity'>('sales');
 
-  const [sales, setSales] = useState<SaleInvoice[]>([]);
-  const [medicines, setMedicines] = useState<Medicine[]>([]);
-  const [expenses, setExpenses] = useState<Expense[]>([]);
-  const [purchases, setPurchases] = useState<PurchaseOrder[]>([]);
+  // Every report below is a real backend aggregation (see reportService.ts) —
+  // this page only maps the response into tables/charts, it never
+  // recomputes COGS/GST/velocity itself. Report figures intentionally
+  // include sales regardless of status (Completed/Refunded/Partially
+  // Refunded) per the approved Phase J decision — not altered here.
+  const [salesSummary, setSalesSummary] = useState<SalesSummaryReport | null>(null);
+  const [monthlyTrend, setMonthlyTrend] = useState<MonthlyTrendItem[] | null>(null);
+  const [categoryDistribution, setCategoryDistribution] = useState<CategoryDistributionItem[] | null>(null);
+  const [isSalesLoading, setIsSalesLoading] = useState(true);
+  const [salesError, setSalesError] = useState<string | null>(null);
 
-  useEffect(() => {
-    loadAll();
-  }, []);
+  const [profitAndLoss, setProfitAndLoss] = useState<ProfitAndLossReport | null>(null);
+  const [isPlLoading, setIsPlLoading] = useState(true);
+  const [plError, setPlError] = useState<string | null>(null);
 
-  const loadAll = async () => {
-    const [sList, mList, eList, pList] = await Promise.all([
-      salesService.getAll(),
-      medicineService.getAll(),
-      expenseService.getAll(),
-      purchaseService.getAll()
-    ]);
-    setSales(sList);
-    setMedicines(mList);
-    setExpenses(eList);
-    setPurchases(pList);
+  const [gst, setGst] = useState<GstReport | null>(null);
+  const [isGstLoading, setIsGstLoading] = useState(true);
+  const [gstError, setGstError] = useState<string | null>(null);
+
+  const [topMedicines, setTopMedicines] = useState<TopMedicineItem[] | null>(null);
+  const [isVelocityLoading, setIsVelocityLoading] = useState(true);
+  const [velocityError, setVelocityError] = useState<string | null>(null);
+
+  const loadSales = async () => {
+    setIsSalesLoading(true);
+    setSalesError(null);
+    try {
+      const [summary, trend, categories] = await Promise.all([
+        reportService.getSalesSummary(),
+        reportService.getMonthlyTrend(6),
+        reportService.getCategoryDistribution()
+      ]);
+      setSalesSummary(summary);
+      setMonthlyTrend(trend);
+      setCategoryDistribution(categories);
+    } catch (err) {
+      setSalesError(err instanceof ApiError ? err.message : 'Failed to load revenue trends.');
+    } finally {
+      setIsSalesLoading(false);
+    }
   };
 
-  // Calculations for Financial P&L
-  const grossSales = sales.reduce((sum, s) => sum + s.grandTotal, 0);
-  const totalDiscounts = sales.reduce((sum, s) => sum + s.discountTotal, 0);
-  const netSales = grossSales - totalDiscounts;
+  const loadPl = async () => {
+    setIsPlLoading(true);
+    setPlError(null);
+    try {
+      setProfitAndLoss(await reportService.getProfitAndLoss());
+    } catch (err) {
+      setPlError(err instanceof ApiError ? err.message : 'Failed to load the profit & loss statement.');
+    } finally {
+      setIsPlLoading(false);
+    }
+  };
 
-  // Estimated COGS (Cost of Goods Sold ~ 65% of sales)
-  const estimatedCOGS = netSales * 0.65;
-  const grossProfit = netSales - estimatedCOGS;
-  const totalOperatingExpenses = expenses.reduce((sum, e) => sum + e.amount, 0);
-  const netOperatingIncome = grossProfit - totalOperatingExpenses;
-  const totalGstCollected = sales.reduce((sum, s) => sum + s.taxTotal, 0);
-  const totalGstPaidOnPurchases = purchases.reduce((sum, p) => sum + p.taxTotal, 0);
-  const netGstPayable = Math.max(0, totalGstCollected - totalGstPaidOnPurchases);
+  const loadGst = async () => {
+    setIsGstLoading(true);
+    setGstError(null);
+    try {
+      setGst(await reportService.getGstReport());
+    } catch (err) {
+      setGstError(err instanceof ApiError ? err.message : 'Failed to load the GST report.');
+    } finally {
+      setIsGstLoading(false);
+    }
+  };
 
-  // Chart data: Sales by Category
-  const categoryMap: { [key: string]: number } = {};
-  medicines.forEach(m => {
-    categoryMap[m.category] = (categoryMap[m.category] || 0) + m.totalStock;
-  });
-  const categoryData = Object.entries(categoryMap).map(([name, value]) => ({ name, value }));
+  const loadVelocity = async () => {
+    setIsVelocityLoading(true);
+    setVelocityError(null);
+    try {
+      setTopMedicines(await reportService.getTopMedicines({ limit: 15 }));
+    } catch (err) {
+      setVelocityError(err instanceof ApiError ? err.message : 'Failed to load sales velocity.');
+    } finally {
+      setIsVelocityLoading(false);
+    }
+  };
 
-  // Chart data: Monthly Revenue Trend in INR thousands
-  const monthlyRevenueData = [
-    { month: 'Mar', sales: 124000, profit: 41000, expenses: 21000 },
-    { month: 'Apr', sales: 148000, profit: 53000, expenses: 23000 },
-    { month: 'May', sales: 162000, profit: 59000, expenses: 22000 },
-    { month: 'Jun', sales: 191000, profit: 68000, expenses: 25000 },
-    { month: 'Jul', sales: 224000, profit: 79000, expenses: 26000 },
-    { month: 'Aug', sales: grossSales > 0 ? grossSales : 268000, profit: grossProfit > 0 ? grossProfit : 94000, expenses: totalOperatingExpenses > 0 ? totalOperatingExpenses : 31000 }
-  ];
+  useEffect(() => {
+    loadSales();
+    loadPl();
+    loadGst();
+    loadVelocity();
+  }, []);
 
-  const COLORS = ['#0f766e', '#0284c7', '#2563eb', '#7c3aed', '#d97706', '#db2777', '#475569'];
+  const monthlyChartData = (monthlyTrend ?? []).map((m) => ({
+    month: `${MONTH_LABELS[m.month - 1]} ${String(m.year).slice(2)}`,
+    sales: m.sales,
+    profit: m.profit,
+    expenses: m.expenses
+  }));
+
+  const categoryChartData = (categoryDistribution ?? []).map((c) => ({ name: c.category, value: c.totalStock }));
 
   const handleExportReport = () => {
     addToast({
@@ -128,25 +188,58 @@ export const ReportsPage: React.FC = () => {
           { id: 'sales', label: 'Revenue Trends', icon: <TrendingUp className="w-3.5 h-3.5" /> },
           { id: 'pl', label: 'Profit & Loss Statement', icon: <IndianRupee className="w-3.5 h-3.5" /> },
           { id: 'gst', label: 'GST Compliance (GSTR-1)', icon: <ShieldCheck className="w-3.5 h-3.5" /> },
-          { id: 'velocity', label: 'Fast Moving Drugs', icon: <Boxes className="w-3.5 h-3.5" /> }
+          { id: 'velocity', label: 'Top Selling Medicines', icon: <Boxes className="w-3.5 h-3.5" /> }
         ]}
       />
 
-      {/* Sales Velocity Tab */}
+      {/* Revenue Trends Tab */}
       {activeTab === 'sales' && (
+        salesError ? (
+          <LoadError message={salesError} onRetry={loadSales} />
+        ) : isSalesLoading ? (
+          <Loading />
+        ) : (
         <div className="space-y-4">
+          {salesSummary && (
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+              <div className="p-3.5 rounded-lg border border-slate-200 bg-white shadow-2xs">
+                <span className="text-xs text-slate-500 font-medium">Gross Sales (YTD)</span>
+                <div className="text-lg font-bold font-mono text-slate-900 mt-0.5">{formatINR(salesSummary.grossSales)}</div>
+                <span className="text-[11px] text-slate-400">{salesSummary.invoiceCount} invoices</span>
+              </div>
+              <div className="p-3.5 rounded-lg border border-slate-200 bg-white shadow-2xs">
+                <span className="text-xs text-slate-500 font-medium">Net Sales</span>
+                <div className="text-lg font-bold font-mono text-emerald-700 mt-0.5">{formatINR(salesSummary.netSales)}</div>
+                <span className="text-[11px] text-slate-400">After {formatINR(salesSummary.totalDiscounts)} discounts</span>
+              </div>
+              <div className="p-3.5 rounded-lg border border-slate-200 bg-white shadow-2xs">
+                <span className="text-xs text-slate-500 font-medium">Tax Collected</span>
+                <div className="text-lg font-bold font-mono text-teal-700 mt-0.5">{formatINR(salesSummary.taxTotal)}</div>
+                <span className="text-[11px] text-slate-400">CGST + SGST</span>
+              </div>
+              <div className="p-3.5 rounded-lg border border-slate-200 bg-white shadow-2xs">
+                <span className="text-xs text-slate-500 font-medium">Payment Split</span>
+                <div className="flex flex-wrap gap-1 mt-1">
+                  {salesSummary.paymentMethodBreakdown.map((p) => (
+                    <Badge key={p.method} variant="outline" size="sm">{p.method}: {formatINR(p.total)}</Badge>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             <div className="lg:col-span-2 rounded-xl border border-slate-200 bg-white p-4 shadow-2xs">
               <div className="mb-3">
                 <h3 className="text-sm font-semibold text-slate-900">
                   Monthly Revenue, Gross Profit & Overheads
                 </h3>
-                <p className="text-xs text-slate-400">Past 6 calendar months (in ₹)</p>
+                <p className="text-xs text-slate-400">Past {monthlyChartData.length} calendar months (in ₹)</p>
               </div>
 
               <div className="h-64 w-full">
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={monthlyRevenueData}>
+                  <BarChart data={monthlyChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" opacity={0.6} />
                     <XAxis dataKey="month" stroke="#94a3b8" fontSize={11} />
                     <YAxis stroke="#94a3b8" fontSize={11} tickFormatter={(v) => `₹${(v / 1000).toFixed(0)}k`} />
@@ -169,10 +262,13 @@ export const ReportsPage: React.FC = () => {
               </div>
 
               <div className="h-64 w-full">
+                {categoryChartData.length === 0 ? (
+                  <div className="h-full flex items-center justify-center text-xs text-slate-400">No active stock yet.</div>
+                ) : (
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
                     <Pie
-                      data={categoryData}
+                      data={categoryChartData}
                       cx="50%"
                       cy="50%"
                       innerRadius={45}
@@ -180,21 +276,28 @@ export const ReportsPage: React.FC = () => {
                       paddingAngle={3}
                       dataKey="value"
                     >
-                      {categoryData.map((_, index) => (
+                      {categoryChartData.map((_, index) => (
                         <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                       ))}
                     </Pie>
                     <Tooltip />
                   </PieChart>
                 </ResponsiveContainer>
+                )}
               </div>
             </div>
           </div>
         </div>
+        )
       )}
 
       {/* P&L Statement Tab */}
       {activeTab === 'pl' && (
+        plError ? (
+          <LoadError message={plError} onRetry={loadPl} />
+        ) : isPlLoading || !profitAndLoss ? (
+          <Loading />
+        ) : (
         <div className="max-w-4xl mx-auto rounded-xl border border-slate-200 bg-white p-5 shadow-2xs">
           <div className="flex justify-between items-center pb-3 border-b border-slate-200 mb-4">
             <div>
@@ -215,15 +318,15 @@ export const ReportsPage: React.FC = () => {
               <div className="space-y-1.5 pt-2">
                 <div className="flex justify-between pl-3 text-slate-600">
                   <span>Gross Drug & Healthcare Sales:</span>
-                  <span className="font-mono font-semibold">{formatINR(grossSales)}</span>
+                  <span className="font-mono font-semibold">{formatINR(profitAndLoss.grossSales)}</span>
                 </div>
                 <div className="flex justify-between pl-3 text-emerald-700">
                   <span>Less: Customer Discounts & Schemes:</span>
-                  <span className="font-mono font-semibold">-{formatINR(totalDiscounts)}</span>
+                  <span className="font-mono font-semibold">-{formatINR(profitAndLoss.totalDiscounts)}</span>
                 </div>
                 <div className="flex justify-between pl-3 font-semibold text-slate-900 bg-slate-50 border border-slate-200 p-2 rounded-lg">
                   <span>Net Sales Revenue:</span>
-                  <span className="font-mono text-emerald-700">{formatINR(netSales)}</span>
+                  <span className="font-mono text-emerald-700">{formatINR(profitAndLoss.netSales)}</span>
                 </div>
               </div>
             </div>
@@ -236,11 +339,11 @@ export const ReportsPage: React.FC = () => {
               <div className="space-y-1.5 pt-2">
                 <div className="flex justify-between pl-3 text-slate-600">
                   <span>Wholesale Procurement & Stock Purchase:</span>
-                  <span className="font-mono font-semibold">-{formatINR(estimatedCOGS)}</span>
+                  <span className="font-mono font-semibold">-{formatINR(profitAndLoss.cogs)}</span>
                 </div>
                 <div className="flex justify-between pl-3 font-semibold text-slate-900 bg-slate-50 border border-slate-200 p-2 rounded-lg">
                   <span>Gross Margin:</span>
-                  <span className="font-mono text-teal-700">{formatINR(grossProfit)} ({netSales > 0 ? ((grossProfit / netSales) * 100).toFixed(1) : 35}%)</span>
+                  <span className="font-mono text-teal-700">{formatINR(profitAndLoss.grossProfit)} ({profitAndLoss.grossMarginPercent}%)</span>
                 </div>
               </div>
             </div>
@@ -251,15 +354,19 @@ export const ReportsPage: React.FC = () => {
                 3. Operating Expenses & Overheads
               </div>
               <div className="space-y-1.5 pt-2">
-                {expenses.map((e) => (
-                  <div key={e.id} className="flex justify-between pl-3 text-slate-500">
-                    <span>{e.title} ({e.category}):</span>
-                    <span className="font-mono font-semibold">-{formatINR(e.amount)}</span>
-                  </div>
-                ))}
+                {profitAndLoss.expenseBreakdown.length === 0 ? (
+                  <p className="pl-3 text-slate-400">No expenses recorded this period.</p>
+                ) : (
+                  profitAndLoss.expenseBreakdown.map((e) => (
+                    <div key={e.category} className="flex justify-between pl-3 text-slate-500">
+                      <span>{e.category}:</span>
+                      <span className="font-mono font-semibold">-{formatINR(e.total)}</span>
+                    </div>
+                  ))
+                )}
                 <div className="flex justify-between pl-3 font-semibold text-slate-900 bg-slate-50 border border-slate-200 p-2 rounded-lg">
                   <span>Total Operating Overheads:</span>
-                  <span className="font-mono text-rose-600">-{formatINR(totalOperatingExpenses)}</span>
+                  <span className="font-mono text-rose-600">-{formatINR(profitAndLoss.totalOperatingExpenses)}</span>
                 </div>
               </div>
             </div>
@@ -270,21 +377,27 @@ export const ReportsPage: React.FC = () => {
                 NET OPERATING PROFIT (EBIT):
               </span>
               <span className="text-base font-bold font-mono text-emerald-800">
-                {formatINR(netOperatingIncome)}
+                {formatINR(profitAndLoss.netOperatingIncome)}
               </span>
             </div>
           </div>
         </div>
+        )
       )}
 
       {/* GST Tax Compliance Tab */}
       {activeTab === 'gst' && (
+        gstError ? (
+          <LoadError message={gstError} onRetry={loadGst} />
+        ) : isGstLoading || !gst ? (
+          <Loading />
+        ) : (
         <div className="max-w-4xl mx-auto space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="p-3.5 rounded-lg border border-slate-200 bg-white shadow-2xs">
               <span className="text-xs text-slate-500 font-medium">Output GST (Sales)</span>
               <div className="text-lg font-bold font-mono text-emerald-700 mt-0.5">
-                {formatINR(totalGstCollected)}
+                {formatINR(gst.totalGstCollected)}
               </div>
               <span className="text-[11px] text-slate-400">CGST (6%) + SGST (6%)</span>
             </div>
@@ -292,7 +405,7 @@ export const ReportsPage: React.FC = () => {
             <div className="p-3.5 rounded-lg border border-slate-200 bg-white shadow-2xs">
               <span className="text-xs text-slate-500 font-medium">Input Tax Credit (ITC)</span>
               <div className="text-lg font-bold font-mono text-teal-700 mt-0.5">
-                {formatINR(totalGstPaidOnPurchases)}
+                {formatINR(gst.totalGstPaidOnPurchases)}
               </div>
               <span className="text-[11px] text-slate-400">From wholesale inward purchases</span>
             </div>
@@ -300,49 +413,53 @@ export const ReportsPage: React.FC = () => {
             <div className="p-3.5 rounded-lg border border-slate-200 bg-white shadow-2xs">
               <span className="text-xs text-slate-500 font-medium">Net GST Liability</span>
               <div className="text-lg font-bold font-mono text-slate-900 mt-0.5">
-                {formatINR(netGstPayable)}
+                {formatINR(gst.netGstPayable)}
               </div>
               <span className="text-[11px] text-slate-400">Due for monthly filing</span>
             </div>
           </div>
         </div>
+        )
       )}
 
-      {/* Fast Moving Drugs */}
+      {/* Top Selling Medicines */}
       {activeTab === 'velocity' && (
+        velocityError ? (
+          <LoadError message={velocityError} onRetry={loadVelocity} />
+        ) : isVelocityLoading ? (
+          <Loading />
+        ) : !topMedicines || topMedicines.length === 0 ? (
+          <div className="rounded-xl border border-slate-200 bg-white p-10 text-center text-xs text-slate-400">No sales recorded yet.</div>
+        ) : (
         <div className="rounded-xl border border-slate-200 bg-white overflow-hidden shadow-2xs">
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
               <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
                 <tr>
+                  <th className="py-2.5 px-3.5 font-semibold">#</th>
                   <th className="py-2.5 px-3.5 font-semibold">Medicine Name</th>
-                  <th className="py-2.5 px-3.5 font-semibold">Therapeutic Class</th>
-                  <th className="py-2.5 px-3.5 font-semibold text-right">Current Stock</th>
-                  <th className="py-2.5 px-3.5 font-semibold text-right">Selling Rate</th>
-                  <th className="py-2.5 px-3.5 font-semibold text-center">Movement Classification</th>
+                  <th className="py-2.5 px-3.5 font-semibold text-right">Units Sold (YTD)</th>
+                  <th className="py-2.5 px-3.5 font-semibold text-right">Revenue</th>
+                  <th className="py-2.5 px-3.5 font-semibold text-center">Rank</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {medicines.map((m, idx) => {
-                  const isFast = idx % 2 === 0;
-                  return (
-                    <tr key={m.id} className="hover:bg-slate-50">
-                      <td className="py-2.5 px-3.5 font-semibold text-slate-900">{m.name}</td>
-                      <td className="py-2.5 px-3.5 text-slate-600">{m.category}</td>
-                      <td className="py-2.5 px-3.5 text-right font-mono font-bold text-slate-900">{m.totalStock} units</td>
-                      <td className="py-2.5 px-3.5 text-right font-mono font-semibold">{formatINR(m.sellingPrice)}</td>
-                      <td className="py-2.5 px-3.5 text-center">
-                        <Badge variant={isFast ? 'success' : 'default'} size="sm">
-                          {isFast ? 'Fast Moving' : 'Moderate'}
-                        </Badge>
-                      </td>
-                    </tr>
-                  );
-                })}
+                {topMedicines.map((m, idx) => (
+                  <tr key={m.medicineId} className="hover:bg-slate-50">
+                    <td className="py-2.5 px-3.5 text-slate-400 font-mono">{idx + 1}</td>
+                    <td className="py-2.5 px-3.5 font-semibold text-slate-900">{m.medicineName}</td>
+                    <td className="py-2.5 px-3.5 text-right font-mono font-bold text-slate-900">{m.quantitySold} units</td>
+                    <td className="py-2.5 px-3.5 text-right font-mono font-semibold">{formatINR(m.revenue)}</td>
+                    <td className="py-2.5 px-3.5 text-center">
+                      <Badge variant="success" size="sm">Top Mover</Badge>
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
         </div>
+        )
       )}
     </div>
   );

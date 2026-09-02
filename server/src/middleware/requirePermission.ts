@@ -23,3 +23,25 @@ export function requirePermission(permission: Permission) {
     next();
   };
 }
+
+/**
+ * For the rare endpoint that legitimately serves two distinct permission-bearing
+ * audiences (e.g. a combined returns dashboard read by both refund_sale and
+ * manage_purchases holders) — passes if the caller holds ANY of the listed
+ * permissions. Prefer requirePermission for everything else; this is not a
+ * general-purpose looser check.
+ */
+export function requireAnyPermission(...permissions: Permission[]) {
+  return (req: Request, _res: Response, next: NextFunction): void => {
+    if (!req.user) {
+      next(AppError.unauthorized('Authentication required'));
+      return;
+    }
+    if (!permissions.some((p) => req.user!.permissions.includes(p))) {
+      auditLog('permission_denied', { userId: req.user.userId, permission: permissions.join('|'), path: req.path });
+      next(AppError.forbidden('You do not have permission to perform this action'));
+      return;
+    }
+    next();
+  };
+}

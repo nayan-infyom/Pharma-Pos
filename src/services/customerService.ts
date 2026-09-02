@@ -1,94 +1,74 @@
-import { Customer } from '../types';
-import { initialCustomers } from '../data/customers';
+import { Customer, CustomerLedgerEntry } from '../types';
+import * as customersApi from '../api/customers';
+import { Pagination } from '../api/client';
 
-const STORAGE_KEY = 'pharmapos_customers_v1';
+/**
+ * Phase K batch 2: backed by the real API. Method names/signatures are
+ * preserved where existing pages (GlobalSearchModal, PrescriptionsPage,
+ * DashboardPage) already call them, so those keep compiling untouched;
+ * new methods (list/getLedger) were added for the pages actually migrated
+ * this batch (CustomersPage, POS CustomerSelectModal).
+ */
+export interface CreateCustomerInput {
+  name: string;
+  phone: string;
+  email?: string;
+  address?: string;
+  city?: string;
+  patientAge?: number;
+  patientGender?: 'Male' | 'Female' | 'Other';
+  creditLimit?: number;
+  notes?: string;
+  allergies?: string[];
+  chronicConditions?: string[];
+  doctorName?: string;
+}
 
 class CustomerService {
-  private customers: Customer[];
-
-  constructor() {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        this.customers = JSON.parse(saved);
-      } catch (e) {
-        this.customers = initialCustomers;
-      }
-    } else {
-      this.customers = initialCustomers;
-      this.persist();
-    }
-  }
-
-  private persist() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.customers));
-  }
-
+  /** Capped at the backend's max page size (100) — see medicineService's identical, already-flagged limitation. */
   async getAll(): Promise<Customer[]> {
-    return [...this.customers];
+    const { items } = await customersApi.listCustomers({ limit: 100 });
+    return items;
+  }
+
+  async list(params: customersApi.ListCustomersParams = {}): Promise<{ items: Customer[]; pagination: Pagination }> {
+    return customersApi.listCustomers(params);
   }
 
   async getById(id: string): Promise<Customer | undefined> {
-    return this.customers.find(c => c.id === id);
+    try {
+      return await customersApi.getCustomerById(id);
+    } catch {
+      return undefined;
+    }
   }
 
   async search(query?: string): Promise<Customer[]> {
-    const q = (query || '').toLowerCase().trim();
-    if (!q) return this.customers;
-    return this.customers.filter(c =>
-      (c.name || '').toLowerCase().includes(q) ||
-      (c.phone || '').includes(q) ||
-      (c.email && c.email.toLowerCase().includes(q))
-    );
+    const { items } = await customersApi.listCustomers({ search: query || undefined, limit: 100 });
+    return items;
   }
 
-  async create(customer: Omit<Customer, 'id' | 'totalPurchases' | 'lastVisit'>): Promise<Customer> {
-    const newCustomer: Customer = {
-      ...customer,
-      id: `cust-${Date.now()}`,
-      totalPurchases: 0,
-      lastVisit: new Date().toISOString().split('T')[0]
-    };
-    this.customers.unshift(newCustomer);
-    this.persist();
-    return newCustomer;
+  async create(input: CreateCustomerInput): Promise<Customer> {
+    return customersApi.createCustomer(input);
   }
 
-  async update(id: string, updates: Partial<Customer>): Promise<Customer> {
-    const index = this.customers.findIndex(c => c.id === id);
-    if (index === -1) throw new Error('Customer not found');
-    this.customers[index] = { ...this.customers[index], ...updates };
-    this.persist();
-    return this.customers[index];
+  async update(id: string, updates: Partial<CreateCustomerInput>): Promise<Customer> {
+    return customersApi.updateCustomer(id, updates);
   }
 
-  async recordPurchase(id: string, amount: number, isCredit: boolean = false): Promise<void> {
-    const customer = this.customers.find(c => c.id === id);
-    if (!customer) return;
-
-    customer.totalPurchases += amount;
-    customer.lastVisit = new Date().toISOString().split('T')[0];
-    customer.loyaltyPoints += Math.floor(amount / 100); // 1 point per $100
-
-    if (isCredit) {
-      customer.outstandingBalance += amount;
-    }
-
-    this.persist();
+  async getLedger(id: string, page = 1, limit = 25): Promise<{ items: CustomerLedgerEntry[]; pagination: Pagination }> {
+    return customersApi.getCustomerLedger(id, page, limit);
   }
 
-  async updateBalance(id: string, amountChange: number): Promise<void> {
-    const customer = this.customers.find(c => c.id === id);
-    if (!customer) return;
-    customer.outstandingBalance = Math.max(0, customer.outstandingBalance + amountChange);
-    this.persist();
-  }
-
-  async settleBalance(id: string, amountReceived: number): Promise<Customer | null> {
-    const customer = this.customers.find(c => c.id === id);
-    if (!customer) return null;
-    customer.outstandingBalance = Math.max(0, customer.outstandingBalance - amountReceived);
-    this.persist();
+  /**
+   * Ledger-backed settlement (server writes a CustomerLedgerEntry and updates
+   * outstandingBalance atomically — see server/src/services/customerService.ts).
+   * `method` now actually reaches the server (the old localStorage version
+   * silently dropped it — DashboardPage's Quick Settle modal collects a
+   * method but never passed it through; fixed at that call site too).
+   */
+  async settleBalance(id: string, amount: number, method: 'Cash' | 'UPI' | 'Card' = 'Cash', reference?: string, notes?: string): Promise<Customer> {
+    const { customer } = await customersApi.settleCustomerBalance(id, { amount, method, reference, notes });
     return customer;
   }
 }

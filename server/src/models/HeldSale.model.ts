@@ -35,3 +35,4 @@ heldSaleSchema.index({ cashierId: 1 });
 toJSONPlugin(heldSaleSchema);
 
 export const HeldSale = model('HeldSale', heldSaleSchema);
+export type HeldSaleDoc = InstanceType<typeof HeldSale>;

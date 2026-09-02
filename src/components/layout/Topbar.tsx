@@ -11,11 +11,11 @@ import {
   AlertTriangle,
   Clock,
   ChevronDown,
-  ShoppingCart
+  ShoppingCart,
+  LogOut
 } from 'lucide-react';
 import { Kbd } from '../ui/Kbd';
 import { Badge } from '../ui/Badge';
-import { initialEmployees } from '../../data/employees';
 
 export const Topbar: React.FC = () => {
   const {
@@ -25,7 +25,8 @@ export const Topbar: React.FC = () => {
     currentStore,
     setCurrentStore,
     currentUser,
-    setCurrentUser
+    logout,
+    addToast
   } = useAppStore();
 
   const location = useLocation();
@@ -309,29 +310,7 @@ export const Topbar: React.FC = () => {
                 <div className="text-[11px] text-slate-500">{currentUser.role}</div>
               </div>
 
-              <div className="px-3 py-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider mt-1">
-                Switch Staff Role
-              </div>
-              {initialEmployees.map((emp) => (
-                <button
-                  key={emp.id}
-                  onClick={() => {
-                    setCurrentUser(emp);
-                    setUserMenuOpen(false);
-                  }}
-                  className={`w-full text-left px-3 py-1.5 text-xs flex items-center justify-between hover:bg-slate-50 cursor-pointer ${
-                    currentUser.id === emp.id ? 'text-emerald-700 font-semibold bg-emerald-50/60' : 'text-slate-700'
-                  }`}
-                >
-                  <div>
-                    <div>{emp.name}</div>
-                    <div className="text-[10px] text-slate-400">{emp.role}</div>
-                  </div>
-                  {currentUser.id === emp.id && <CheckCircle className="w-3.5 h-3.5 text-emerald-600 shrink-0" />}
-                </button>
-              ))}
-
-              <div className="border-t border-slate-100 mt-1 pt-1">
+              <div className="border-t border-slate-100 pt-1">
                 <button
                   onClick={() => {
                     setUserMenuOpen(false);
@@ -340,6 +319,17 @@ export const Topbar: React.FC = () => {
                   className="w-full text-left px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50 cursor-pointer"
                 >
                   Settings & Configurations
+                </button>
+                <button
+                  onClick={async () => {
+                    setUserMenuOpen(false);
+                    await logout();
+                    addToast({ type: 'info', title: 'Signed out', message: 'You have been logged out.' });
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-xs text-rose-600 hover:bg-rose-50 cursor-pointer flex items-center gap-1.5"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  Log out
                 </button>
               </div>
             </div>

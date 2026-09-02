@@ -38,3 +38,4 @@ purchaseReturnSchema.index({ date: -1 });
 toJSONPlugin(purchaseReturnSchema);
 
 export const PurchaseReturn = model('PurchaseReturn', purchaseReturnSchema);
+export type PurchaseReturnDoc = InstanceType<typeof PurchaseReturn>;

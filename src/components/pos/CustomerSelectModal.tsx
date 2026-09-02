@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Customer } from '../../types';
 import { customerService } from '../../services/customerService';
 import { Modal } from '../ui/Modal';
@@ -26,6 +26,8 @@ export const CustomerSelectModal: React.FC<CustomerSelectModalProps> = ({
   const [query, setQuery] = useState('');
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [isCreatingNew, setIsCreatingNew] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // New customer form state
   const [newName, setNewName] = useState('');
@@ -49,11 +51,13 @@ export const CustomerSelectModal: React.FC<CustomerSelectModalProps> = ({
   const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setQuery(val);
-    loadCustomers(val);
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = setTimeout(() => loadCustomers(val), 300);
   };
 
   const handleCreateCustomer = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isCreating) return;
     if (!newName.trim() || !newPhone.trim()) {
       addToast({
         type: 'error',
@@ -63,24 +67,33 @@ export const CustomerSelectModal: React.FC<CustomerSelectModalProps> = ({
       return;
     }
 
-    const created = await customerService.create({
-      name: newName.trim(),
-      phone: newPhone.trim(),
-      email: newEmail.trim() || undefined,
-      doctorName: newDoctor.trim() || undefined,
-      creditLimit: parseFloat(newCreditLimit) || 0,
-      outstandingBalance: 0,
-      loyaltyPoints: 10
-    });
+    setIsCreating(true);
+    try {
+      const created = await customerService.create({
+        name: newName.trim(),
+        phone: newPhone.trim(),
+        email: newEmail.trim() || undefined,
+        doctorName: newDoctor.trim() || undefined,
+        creditLimit: parseFloat(newCreditLimit) || 0
+      });
 
-    addToast({
-      type: 'success',
-      title: 'Customer Added',
-      message: `${created.name} registered and selected.`
-    });
+      addToast({
+        type: 'success',
+        title: 'Customer Added',
+        message: `${created.name} registered and selected.`
+      });
 
-    onSelectCustomer(created);
-    onClose();
+      onSelectCustomer(created);
+      onClose();
+    } catch (err) {
+      addToast({
+        type: 'error',
+        title: 'Could Not Add Customer',
+        message: err instanceof Error ? err.message : 'Failed to create customer.'
+      });
+    } finally {
+      setIsCreating(false);
+    }
   };
 
   return (
@@ -213,10 +226,11 @@ export const CustomerSelectModal: React.FC<CustomerSelectModalProps> = ({
               variant="outline"
               size="sm"
               onClick={() => setIsCreatingNew(false)}
+              disabled={isCreating}
             >
               Back
             </Button>
-            <Button type="submit" variant="primary" size="sm">
+            <Button type="submit" variant="primary" size="sm" isLoading={isCreating}>
               Save Customer
             </Button>
           </div>

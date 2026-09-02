@@ -34,17 +34,13 @@ export const PaymentModal: React.FC = () => {
     customer,
     doctorName,
     cartDiscountPercent,
-    getSubtotal,
-    getTotalDiscount,
-    getTaxTotal,
-    getRoundOff,
     getGrandTotal,
     clearCart,
     setLastCompletedSale,
     setIsCompletedModalOpen
   } = usePOSStore();
 
-  const { currentUser, addToast } = useAppStore();
+  const { addToast } = useAppStore();
 
   const grandTotal = getGrandTotal();
   const [cashTendered, setCashTendered] = useState<number>(grandTotal);
@@ -97,53 +93,25 @@ export const PaymentModal: React.FC = () => {
 
   const handleCompleteSale = async () => {
     if (cart.length === 0) return;
+    if (isProcessing) return;
     setIsProcessing(true);
 
     try {
+      // Server resolves FEFO batches and recomputes every rupee itself
+      // (Phase F) — the client only sends what it actually chose, not the
+      // full priced invoice the old localStorage version persisted verbatim.
       const sale = await salesService.createSale({
-        customerName: customer?.name || 'Walk-in Customer',
-        customerPhone: customer?.phone || '9800000000',
-        customerId: customer?.id,
-        doctorName: doctorName || undefined,
-        cashierName: currentUser.name,
-        cashierId: currentUser.id,
-        storeName: 'Apex Care Pharmacy - Main Branch',
-        status: 'Completed',
-        paymentMethod,
-        splitDetails: paymentMethod === 'Split' ? (splitDetails as any) : undefined,
         items: cart.map(item => ({
           medicineId: item.medicineId,
-          medicineName: item.medicineName,
-          genericName: item.genericName,
-          brand: item.brand,
-          dosageForm: item.dosageForm,
-          strength: item.strength,
-          packSize: item.packSize,
-          batchId: item.batchId,
-          batchNumber: item.batchNumber,
-          expiryDate: item.expiryDate,
-          availableBatchStock: item.availableBatchStock,
           quantity: item.quantity,
-          purchasePrice: item.purchasePrice,
-          unitPrice: item.unitPrice,
-          mrp: item.mrp,
-          discountPercent: item.discountPercent,
-          discountAmount: item.discountAmount,
-          taxRate: item.taxRate,
-          taxAmount: item.taxAmount,
-          subtotal: item.subtotal,
-          total: item.total,
-          prescriptionRequired: item.prescriptionRequired
+          discountPercent: item.discountPercent
         })),
-        itemCount: cart.reduce((sum, i) => sum + i.quantity, 0),
-        subtotal: getSubtotal(),
-        discountTotal: getTotalDiscount(),
-        taxTotal: getTaxTotal(),
-        roundOff: getRoundOff(),
-        grandTotal,
-        amountPaid: paymentMethod === 'Cash' ? cashTendered : grandTotal,
-        changeDue: paymentMethod === 'Cash' ? changeDue : 0,
-        changeReturned: paymentMethod === 'Cash' ? changeDue : 0
+        customerId: customer?.id,
+        doctorName: doctorName || undefined,
+        cartDiscountPercent,
+        paymentMethod,
+        splitDetails: paymentMethod === 'Split' ? splitDetails : undefined,
+        amountPaid: paymentMethod === 'Cash' ? cashTendered : grandTotal
       });
 
       addToast({
