@@ -1,20 +1,51 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { usePOSStore } from '../../store/usePOSStore';
+import { useAppStore } from '../../store/useAppStore';
 import { Drawer } from '../ui/Drawer';
 import { Button } from '../ui/Button';
-import { ShoppingCart, Play, Trash2, Clock, User } from 'lucide-react';
+import { ShoppingCart, Play, Trash2, Clock, User, Loader2 } from 'lucide-react';
 import { EmptyState } from '../ui/EmptyState';
-import { formatINR } from '../../utils/formatters';
+import { formatINR, formatTime } from '../../utils/formatters';
 
 export const HeldSalesDrawer: React.FC<{ isOpen: boolean; onClose: () => void }> = ({
   isOpen,
   onClose
 }) => {
-  const { heldSales, resumeSale, deleteHeldSale } = usePOSStore();
+  const { heldSales, isHeldSalesLoading, resumeSale, deleteHeldSale } = usePOSStore();
+  const { addToast } = useAppStore();
+  const [busyId, setBusyId] = useState<string | null>(null);
 
-  const handleResume = (id: string) => {
-    resumeSale(id);
-    onClose();
+  const handleResume = async (id: string) => {
+    if (busyId) return;
+    setBusyId(id);
+    try {
+      await resumeSale(id);
+      onClose();
+    } catch (err) {
+      addToast({
+        type: 'error',
+        title: 'Could Not Resume Cart',
+        message: err instanceof Error ? err.message : 'Failed to resume this held cart.'
+      });
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleDiscard = async (id: string) => {
+    if (busyId) return;
+    setBusyId(id);
+    try {
+      await deleteHeldSale(id);
+    } catch (err) {
+      addToast({
+        type: 'error',
+        title: 'Could Not Discard Cart',
+        message: err instanceof Error ? err.message : 'Failed to discard this held cart.'
+      });
+    } finally {
+      setBusyId(null);
+    }
   };
 
   return (
@@ -30,7 +61,11 @@ export const HeldSalesDrawer: React.FC<{ isOpen: boolean; onClose: () => void }>
       description="Recall paused customer transactions to resume billing (F9)"
       width="md"
     >
-      {heldSales.length === 0 ? (
+      {isHeldSalesLoading ? (
+        <div className="p-8 flex justify-center text-slate-400">
+          <Loader2 className="w-5 h-5 animate-spin" />
+        </div>
+      ) : heldSales.length === 0 ? (
         <EmptyState
           icon={<ShoppingCart className="w-8 h-8 text-slate-400" />}
           title="No Held Transactions"
@@ -50,7 +85,7 @@ export const HeldSalesDrawer: React.FC<{ isOpen: boolean; onClose: () => void }>
                     {sale.customer?.name || 'Walk-in Customer'}
                   </h4>
                   <div className="flex items-center gap-2 text-[11px] text-slate-500 mt-0.5">
-                    <span>Held at {sale.heldAt}</span>
+                    <span>Held at {formatTime(sale.heldAt)}</span>
                     <span>•</span>
                     <span>{sale.items.length} items</span>
                   </div>
@@ -80,8 +115,9 @@ export const HeldSalesDrawer: React.FC<{ isOpen: boolean; onClose: () => void }>
                   variant="ghost"
                   size="xs"
                   className="text-rose-600 hover:text-rose-700"
-                  leftIcon={<Trash2 className="w-3.5 h-3.5" />}
-                  onClick={() => deleteHeldSale(sale.id)}
+                  leftIcon={busyId === sale.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                  disabled={busyId !== null}
+                  onClick={() => handleDiscard(sale.id)}
                 >
                   Discard
                 </Button>
@@ -90,6 +126,8 @@ export const HeldSalesDrawer: React.FC<{ isOpen: boolean; onClose: () => void }>
                   variant="primary"
                   size="xs"
                   leftIcon={<Play className="w-3.5 h-3.5 fill-current" />}
+                  isLoading={busyId === sale.id}
+                  disabled={busyId !== null}
                   onClick={() => handleResume(sale.id)}
                 >
                   Resume Billing
@@ -102,4 +140,3 @@ export const HeldSalesDrawer: React.FC<{ isOpen: boolean; onClose: () => void }>
     </Drawer>
   );
 };
-

@@ -24,3 +24,4 @@ expenseSchema.index({ category: 1 });
 toJSONPlugin(expenseSchema);
 
 export const Expense = model('Expense', expenseSchema);
+export type ExpenseDoc = InstanceType<typeof Expense>;

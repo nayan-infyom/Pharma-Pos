@@ -69,3 +69,4 @@ const settingsSchema = new Schema(
 toJSONPlugin(settingsSchema);
 
 export const Settings = model('Settings', settingsSchema);
+export type SettingsDoc = InstanceType<typeof Settings>;

@@ -120,6 +120,19 @@ export interface Customer {
   doctorName?: string;
 }
 
+/** Append-only Khata ledger entry (backend CustomerLedgerEntry — see server/src/models/CustomerLedgerEntry.model.ts).
+ *  Signed amount: CreditSale/Adjustment(+) increase outstandingBalance, Payment/ReturnCredit decrease it. */
+export interface CustomerLedgerEntry {
+  id: string;
+  customerId: string;
+  type: 'CreditSale' | 'Payment' | 'ReturnCredit' | 'Adjustment';
+  amount: number;
+  balanceAfter: number;
+  referenceId: string;
+  notes?: string;
+  createdAt: string;
+}
+
 export type PaymentMethod = 'Cash' | 'UPI' | 'Card' | 'Bank Transfer' | 'Credit' | 'Split' | 'UPI/QR';
 
 export interface SplitPaymentDetail {
@@ -160,6 +173,14 @@ export interface HeldSale {
   id: string;
   name: string;
   heldAt: string;
+  // The backend stores customerId (a real reference) + a lightweight
+  // {id,name,phone} customerSnapshot for display — not the full Customer
+  // (see api/heldSales.ts). `customer` here is reconstructed from that
+  // snapshot for the drawer's own list preview; resuming a sale re-fetches
+  // the real, current Customer by customerId rather than trusting this
+  // possibly-stale snapshot (loyaltyPoints/outstandingBalance/etc. would be
+  // wrong here) — see usePOSStore.resumeSale.
+  customerId?: string;
   customer?: Customer | null;
   items: CartItem[];
   subtotal: number;
@@ -184,6 +205,19 @@ export interface Supplier {
   status: 'Active' | 'Inactive';
 }
 
+/** Append-only supplier payable ledger entry (backend SupplierLedgerEntry).
+ *  Signed amount: PurchaseCredit/Adjustment(+) increase outstandingAmount, Payment/PurchaseReturnDebit decrease it. */
+export interface SupplierLedgerEntry {
+  id: string;
+  supplierId: string;
+  type: 'PurchaseCredit' | 'Payment' | 'PurchaseReturnDebit' | 'Adjustment';
+  amount: number;
+  balanceAfter: number;
+  referenceId: string;
+  notes?: string;
+  createdAt: string;
+}
+
 export interface PurchaseItem {
   medicineId: string;
   medicineName: string;
@@ -194,6 +228,8 @@ export interface PurchaseItem {
   freeQuantity: number;
   purchasePrice: number;
   mrp: number;
+  // Required by the backend (no auto-margin rule — purchasing staff sets it explicitly, validated <= mrp).
+  sellingPrice: number;
   taxRate: number;
   taxAmount: number;
   discountPercent: number;
@@ -223,7 +259,10 @@ export interface PurchaseOrder {
 }
 
 export interface PrescriptionItem {
-  medicineId: string;
+  // Optional: a prescription frequently names a drug the pharmacy hasn't
+  // catalogued yet (handwritten Rx, generic substitution) — see backend
+  // Prescription.model.ts. Not existence-checked against Medicine either.
+  medicineId?: string;
   medicineName: string;
   dosage: string;
   frequency?: string;
@@ -237,29 +276,21 @@ export interface Prescription {
   id: string;
   prescriptionNumber: string;
   customerId?: string;
+  // customerName does not exist on the backend model — patientName is the
+  // one canonical field. Kept optional here only so old call sites that
+  // still do `rx.customerName || rx.patientName` keep compiling.
   customerName?: string;
-  patientName?: string;
+  patientName: string;
   patientAge?: number;
   patientGender?: 'Male' | 'Female' | 'Other';
   patientPhone?: string;
   doctorName: string;
-  hospitalClinic: string;
-  doctorRegNumber?: string;
+  hospitalClinic?: string;
   doctorRegistrationNumber?: string;
-  date?: string;
-  prescribedDate?: string;
+  prescribedDate: string;
   expiryDate?: string;
-  diagnosis: string;
-  items?: PrescriptionItem[];
-  medicines?: {
-    medicineName: string;
-    genericName?: string;
-    dosage: string;
-    duration: string;
-    timing: 'Before Food' | 'After Food' | 'With Food' | 'Empty Stomach' | 'Bedtime';
-    quantity: number;
-    notes?: string;
-  }[];
+  diagnosis?: string;
+  items: PrescriptionItem[];
   refillsAllowed?: number;
   refillsRemaining?: number;
   notes?: string;
@@ -267,34 +298,16 @@ export interface Prescription {
   status: 'Active' | 'Dispensed' | 'Partially Dispensed' | 'Expired' | 'Pending';
 }
 
-export interface ReturnItem {
-  medicineId: string;
-  medicineName: string;
-  batchId?: string;
-  batchNumber: string;
-  quantity: number;
-  unitPrice: number;
-  total: number;
-  restockable: boolean;
-  reason: string;
-}
-
-export interface ReturnRecord {
-  id: string;
-  type: 'Sales Return' | 'Purchase Return';
-  originalInvoiceNumber: string;
-  customerOrSupplierName: string;
-  date: string;
-  reason: string;
-  refundAmount: number;
-  refundMethod: 'Cash' | 'Credit Note' | 'Original Method';
-  items: ReturnItem[];
-  restocked: boolean;
-}
+export type SalesReturnReason = 'Damaged Packaging' | 'Wrong Dosage' | 'Doctor Changed Rx' | 'Adverse Reaction' | 'Patient Recovered' | 'Other';
+export type PurchaseReturnReason = 'Near Expiry Received' | 'Damaged in Transit' | 'Excess Stock' | 'Rate Discrepancy';
 
 export interface SalesReturn {
   id: string;
   returnNumber: string;
+  // Real document reference — server validates returnQuantity against this
+  // sale's actual billed quantity (BUSINESS_RULES.md Rule 5.1), never a
+  // free-text invoice number.
+  originalSaleId: string;
   originalInvoiceNumber: string;
   customerId?: string;
   customerName: string;
@@ -304,9 +317,10 @@ export interface SalesReturn {
     medicineName: string;
     batchNumber: string;
     returnQuantity: number;
+    // Server-derived from the original sale line — never client-supplied.
     unitPrice: number;
     refundAmount: number;
-    reason: 'Damaged Packaging' | 'Wrong Dosage' | 'Doctor Changed Rx' | 'Adverse Reaction' | 'Patient Recovered' | 'Other';
+    reason: SalesReturnReason;
   }[];
   totalRefundAmount: number;
   refundMethod: 'Cash' | 'Credit Note' | 'Original Payment';
@@ -317,6 +331,7 @@ export interface SalesReturn {
 export interface PurchaseReturn {
   id: string;
   returnNumber: string;
+  purchaseOrderId: string;
   purchaseInvoiceNumber: string;
   supplierId: string;
   supplierName: string;
@@ -326,13 +341,26 @@ export interface PurchaseReturn {
     medicineName: string;
     batchNumber: string;
     quantity: number;
+    // Server-derived from the original purchase order line — never client-supplied.
     purchasePrice: number;
     totalAmount: number;
-    reason: 'Near Expiry Received' | 'Damaged in Transit' | 'Excess Stock' | 'Rate Discrepancy';
+    reason: PurchaseReturnReason;
   }[];
   totalAmount: number;
   status: 'Pending' | 'Approved' | 'Adjusted';
   notes?: string;
+}
+
+/** Thin summary row from the combined /returns list — item-level detail
+ *  (reason, refundMethod, items) requires the type-specific detail endpoint. */
+export interface CombinedReturnRow {
+  id: string;
+  type: 'Sales Return' | 'Purchase Return';
+  returnNumber: string;
+  referenceInvoiceNumber: string;
+  partyName: string;
+  date: string;
+  amount: number;
 }
 
 export type ExpenseCategory = 
@@ -368,6 +396,68 @@ export interface Expense {
   notes?: string;
 }
 
+/**
+ * Report response shapes — mirror server/src/services/reportService.ts
+ * exactly. Every figure here (COGS, gross profit, GST, velocity ranking) is
+ * a real backend aggregation; the frontend only renders these, it never
+ * recomputes them (the previous ReportsPage's `netSales * 0.65` COGS
+ * estimate, `idx % 2` fast-mover flag, and hardcoded 5/6 months of chart
+ * data were placeholder demo values, not real business logic — see the
+ * backend service's own comment documenting this).
+ */
+export interface SalesSummaryReport {
+  from: string;
+  to: string;
+  grossSales: number;
+  totalDiscounts: number;
+  netSales: number;
+  taxTotal: number;
+  invoiceCount: number;
+  paymentMethodBreakdown: { method: string; total: number; count: number }[];
+}
+
+export interface ProfitAndLossReport {
+  from: string;
+  to: string;
+  grossSales: number;
+  totalDiscounts: number;
+  netSales: number;
+  cogs: number;
+  grossProfit: number;
+  grossMarginPercent: number;
+  totalOperatingExpenses: number;
+  expenseBreakdown: { category: string; total: number }[];
+  netOperatingIncome: number;
+}
+
+export interface GstReport {
+  from: string;
+  to: string;
+  totalGstCollected: number;
+  totalGstPaidOnPurchases: number;
+  netGstPayable: number;
+}
+
+export interface CategoryDistributionItem {
+  category: string;
+  totalStock: number;
+}
+
+export interface MonthlyTrendItem {
+  year: number;
+  month: number;
+  sales: number;
+  profit: number;
+  expenses: number;
+}
+
+export interface TopMedicineItem {
+  medicineId: string;
+  medicineName: string;
+  quantitySold: number;
+  revenue: number;
+}
+
 export type Permission = 
   | 'all'
   | 'pos'
@@ -391,7 +481,7 @@ export interface Employee {
   phone: string;
   role: 'Admin' | 'Chief Pharmacist' | 'Staff Pharmacist' | 'Cashier' | 'Inventory Specialist' | 'Pharmacist' | 'Inventory Manager';
   status: 'Active' | 'On Leave' | 'Inactive';
-  lastActive: string;
+  lastActive?: string;
   joinedDate: string;
   permissions: Permission[];
   avatarUrl?: string;
@@ -481,4 +571,21 @@ export interface StockAdjustment {
   reason: string;
   notes?: string;
   adjustedBy: string;
+}
+
+/** Cross-medicine near-expiry surveillance row (server-aggregated — see
+ *  GET /api/inventory/expiry-radar). lossExposure uses purchase cost, not MRP. */
+export interface ExpiryRadarItem {
+  medicineId: string;
+  medicineName: string;
+  genericName: string;
+  category: string;
+  batchId: string;
+  batchNumber: string;
+  quantity: number;
+  expiryDate: string;
+  purchasePrice: number;
+  mrp: number;
+  lossExposure: number;
+  daysRemaining: number;
 }

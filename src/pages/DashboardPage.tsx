@@ -72,6 +72,7 @@ export const DashboardPage: React.FC = () => {
   const [settleCustomer, setSettleCustomer] = useState<Customer | null>(null);
   const [settleAmount, setSettleAmount] = useState<string>('');
   const [settleMethod, setSettleMethod] = useState<'Cash' | 'UPI' | 'Card'>('Cash');
+  const [isSettling, setIsSettling] = useState(false);
 
   useEffect(() => {
     loadDashboardData();
@@ -171,15 +172,19 @@ export const DashboardPage: React.FC = () => {
   // Settle Khata Payment
   const handleSettleKhataSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!settleCustomer) return;
+    if (!settleCustomer || isSettling) return;
     const amt = parseFloat(settleAmount);
     if (!amt || amt <= 0) {
       addToast({ type: 'error', title: 'Invalid Amount', message: 'Enter a valid payment amount.' });
       return;
     }
 
-    const updated = await customerService.settleBalance(settleCustomer.id, amt);
-    if (updated) {
+    setIsSettling(true);
+    try {
+      // settleMethod was already collected by this form but never actually
+      // reached the old localStorage-backed settleBalance(id, amount) call —
+      // now passed through so it lands on the ledger entry server-side.
+      await customerService.settleBalance(settleCustomer.id, amt, settleMethod);
       addToast({
         type: 'success',
         title: 'Khata Payment Recorded',
@@ -188,6 +193,14 @@ export const DashboardPage: React.FC = () => {
       setSettleCustomer(null);
       setSettleAmount('');
       loadDashboardData();
+    } catch (err) {
+      addToast({
+        type: 'error',
+        title: 'Payment Not Recorded',
+        message: err instanceof Error ? err.message : 'Failed to settle balance.'
+      });
+    } finally {
+      setIsSettling(false);
     }
   };
 
@@ -608,7 +621,7 @@ export const DashboardPage: React.FC = () => {
                   <tbody className="divide-y divide-slate-100">
                     {pendingPrescriptions.map((rx) => (
                       <tr key={rx.id} className="hover:bg-slate-50/80">
-                        <td className="py-2.5 px-3 font-mono font-semibold text-slate-900">{rx.id}</td>
+                        <td className="py-2.5 px-3 font-mono font-semibold text-slate-900">{rx.prescriptionNumber}</td>
                         <td className="py-2.5 px-3 font-semibold text-slate-900">{rx.customerName || rx.patientName}</td>
                         <td className="py-2.5 px-3 text-slate-700">
                           <div>{rx.doctorName}</div>
@@ -1038,10 +1051,10 @@ export const DashboardPage: React.FC = () => {
             </div>
 
             <div className="pt-2 flex justify-end gap-2 border-t border-slate-200">
-              <Button variant="outline" size="sm" type="button" onClick={() => setSettleCustomer(null)}>
+              <Button variant="outline" size="sm" type="button" onClick={() => setSettleCustomer(null)} disabled={isSettling}>
                 Cancel
               </Button>
-              <Button variant="primary" size="sm" type="submit">
+              <Button variant="primary" size="sm" type="submit" isLoading={isSettling}>
                 Record Payment
               </Button>
             </div>

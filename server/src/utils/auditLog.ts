@@ -18,7 +18,9 @@ type AuditEvent =
   | 'sale_failed'
   | 'khata_settlement'
   | 'purchase_received'
-  | 'supplier_payment';
+  | 'supplier_payment'
+  | 'sales_return'
+  | 'purchase_return';
 
 export function auditLog(event: AuditEvent, details: Record<string, string | number | undefined>): void {
   console.log(

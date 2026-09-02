@@ -1,31 +1,60 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { medicineService } from '../services/medicineService';
 import { inventoryService } from '../services/inventoryService';
-import { Medicine, StockMovement } from '../types';
+import { Medicine, StockMovement, ExpiryRadarItem } from '../types';
+import { ApiError, Pagination as PaginationMeta } from '../api/client';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { Badge } from '../components/ui/Badge';
 import { Tabs } from '../components/ui/Tabs';
 import { Modal } from '../components/ui/Modal';
-import { 
-  SlidersHorizontal, 
-  Search, 
+import { Pagination } from '../components/ui/Pagination';
+import {
+  SlidersHorizontal,
+  Search,
   RefreshCw,
-  AlertCircle
+  Loader2
 } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import { formatINR, formatDate, formatTime } from '../utils/formatters';
 
+const PAGE_SIZE = 25;
+
 export const InventoryPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
-  const { currentUser, addToast } = useAppStore();
+  const { addToast } = useAppStore();
 
   const [activeTab, setActiveTab] = useState<'batches' | 'expiring' | 'lowstock' | 'movements'>('batches');
+
+  // "All Batches" tab — capped-at-100 medicine list, same documented
+  // limitation as medicineService elsewhere; also feeds the adjustment
+  // modal's medicine/batch pickers and the valuation stat cards.
   const [medicines, setMedicines] = useState<Medicine[]>([]);
+  const [isMedicinesLoading, setIsMedicinesLoading] = useState(true);
+  const [batchSearch, setBatchSearch] = useState('');
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  // "Near Expiry" tab — server-aggregated radar, replaces the old client-side full-scan.
+  const [expiryItems, setExpiryItems] = useState<ExpiryRadarItem[]>([]);
+  const [expiryPagination, setExpiryPagination] = useState<PaginationMeta | null>(null);
+  const [expiryPage, setExpiryPage] = useState(1);
+  const [isExpiryLoading, setIsExpiryLoading] = useState(true);
+
+  // "Shortage & Reorders" tab
+  const [lowStockItems, setLowStockItems] = useState<Medicine[]>([]);
+  const [lowStockPagination, setLowStockPagination] = useState<PaginationMeta | null>(null);
+  const [lowStockPage, setLowStockPage] = useState(1);
+  const [isLowStockLoading, setIsLowStockLoading] = useState(true);
+
+  // "Audit Trail" tab
   const [movements, setMovements] = useState<StockMovement[]>([]);
-  const [searchQuery, setSearchQuery] = useState('');
+  const [movementsPagination, setMovementsPagination] = useState<PaginationMeta | null>(null);
+  const [movementsPage, setMovementsPage] = useState(1);
+  const [isMovementsLoading, setIsMovementsLoading] = useState(true);
+
   const [isAdjustModalOpen, setIsAdjustModalOpen] = useState(false);
+  const [isAdjusting, setIsAdjusting] = useState(false);
 
   // Adjustment modal form
   const [adjMedId, setAdjMedId] = useState('');
@@ -35,30 +64,103 @@ export const InventoryPage: React.FC = () => {
   const [adjReason, setAdjReason] = useState('Damaged during storage handling');
   const [adjNotes, setAdjNotes] = useState('');
 
+  const loadMedicines = async (search?: string) => {
+    setIsMedicinesLoading(true);
+    try {
+      const list = search ? await medicineService.search(search) : await medicineService.getAll();
+      setMedicines(list);
+      if (list.length > 0 && !adjMedId) {
+        setAdjMedId(list[0].id);
+        if (list[0].batches.length > 0) setAdjBatchId(list[0].batches[0].id);
+      }
+    } catch (err) {
+      addToast({ type: 'error', title: 'Could Not Load Batches', message: err instanceof ApiError ? err.message : 'Failed to load medicines.' });
+    } finally {
+      setIsMedicinesLoading(false);
+    }
+  };
+
+  const loadExpiry = async (page: number) => {
+    setIsExpiryLoading(true);
+    try {
+      const { items, pagination } = await inventoryService.getExpiryRadar('all', page, 50);
+      setExpiryItems(items);
+      setExpiryPagination(pagination);
+    } catch (err) {
+      addToast({ type: 'error', title: 'Could Not Load Expiry Radar', message: err instanceof ApiError ? err.message : 'Failed to load expiry data.' });
+    } finally {
+      setIsExpiryLoading(false);
+    }
+  };
+
+  const loadLowStock = async (page: number) => {
+    setIsLowStockLoading(true);
+    try {
+      const { items, pagination } = await inventoryService.getLowStock(page, PAGE_SIZE);
+      setLowStockItems(items);
+      setLowStockPagination(pagination);
+    } catch (err) {
+      addToast({ type: 'error', title: 'Could Not Load Shortage List', message: err instanceof ApiError ? err.message : 'Failed to load low-stock data.' });
+    } finally {
+      setIsLowStockLoading(false);
+    }
+  };
+
+  const loadMovements = async (page: number) => {
+    setIsMovementsLoading(true);
+    try {
+      const { items, pagination } = await inventoryService.listMovements({ page, limit: PAGE_SIZE });
+      setMovements(items);
+      setMovementsPagination(pagination);
+    } catch (err) {
+      addToast({ type: 'error', title: 'Could Not Load Audit Trail', message: err instanceof ApiError ? err.message : 'Failed to load stock movements.' });
+    } finally {
+      setIsMovementsLoading(false);
+    }
+  };
+
+  const loadAll = () => {
+    loadMedicines();
+    loadExpiry(1);
+    setExpiryPage(1);
+    loadLowStock(1);
+    setLowStockPage(1);
+    loadMovements(1);
+    setMovementsPage(1);
+  };
+
   useEffect(() => {
-    loadData();
+    loadAll();
     if (searchParams.get('action') === 'adjust') {
       setIsAdjustModalOpen(true);
       setSearchParams({});
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const loadData = async () => {
-    const [medList, movList] = await Promise.all([
-      medicineService.getAll(),
-      inventoryService.getMovements()
-    ]);
-    setMedicines(medList);
-    setMovements(movList);
-    if (medList.length > 0) {
-      setAdjMedId(medList[0].id);
-      if (medList[0].batches.length > 0) {
-        setAdjBatchId(medList[0].batches[0].id);
-      }
-    }
+  useEffect(() => {
+    loadExpiry(expiryPage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expiryPage]);
+
+  useEffect(() => {
+    loadLowStock(lowStockPage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lowStockPage]);
+
+  useEffect(() => {
+    loadMovements(movementsPage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [movementsPage]);
+
+  const handleBatchSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setBatchSearch(val);
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = setTimeout(() => loadMedicines(val), 300);
   };
 
-  // Flatten all batches
+  // Flatten all batches (current page of medicines only — same capped pattern as elsewhere)
   const allBatches = medicines.flatMap(m =>
     m.batches.map(b => ({
       ...b,
@@ -70,23 +172,15 @@ export const InventoryPage: React.FC = () => {
     }))
   );
 
-  // Calculations
+  // Valuation stats — approximate, over the capped medicine set (documented limitation, same as Customers/Suppliers stat strips).
   const totalStockUnits = allBatches.reduce((sum, b) => sum + b.quantity, 0);
   const totalCostValuation = allBatches.reduce((sum, b) => sum + b.quantity * b.purchasePrice, 0);
   const totalRetailValuation = allBatches.reduce((sum, b) => sum + b.quantity * b.mrp, 0);
   const projectedMargin = totalRetailValuation > 0 ? ((totalRetailValuation - totalCostValuation) / totalRetailValuation) * 100 : 0;
 
-  // Near expiry batches (<90 days)
-  const expiringBatches = allBatches.filter(b => {
-    const days = (new Date(b.expiryDate).getTime() - new Date().getTime()) / (1000 * 3600 * 24);
-    return days > 0 && days <= 90;
-  }).sort((a, b) => new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime());
-
-  // Low stock medicines
-  const lowStockMedicines = medicines.filter(m => m.totalStock <= m.reorderLevel);
-
   const handleAdjustSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isAdjusting) return;
     const med = medicines.find(m => m.id === adjMedId);
     if (!med) return;
     const batch = med.batches.find(b => b.id === adjBatchId) || med.batches[0];
@@ -94,26 +188,36 @@ export const InventoryPage: React.FC = () => {
 
     const qty = parseInt(adjQty) || 1;
 
-    await inventoryService.adjustStock({
-      medicineId: med.id,
-      medicineName: med.name,
-      batchId: batch.id,
-      batchNumber: batch.batchNumber,
-      adjustmentType: adjType,
-      quantity: qty,
-      reason: adjReason,
-      notes: adjNotes,
-      adjustedBy: currentUser.name
-    });
+    setIsAdjusting(true);
+    try {
+      // Server derives medicineName/batchNumber from the medicine/batch
+      // record and adjustedBy from the authenticated actor — not sent here.
+      await inventoryService.adjustStock({
+        medicineId: med.id,
+        batchId: batch.id,
+        adjustmentType: adjType,
+        quantity: qty,
+        reason: adjReason,
+        notes: adjNotes || undefined
+      });
 
-    addToast({
-      type: 'success',
-      title: 'Stock Adjusted',
-      message: `${adjType} recorded for ${med.name} (Batch: ${batch.batchNumber}).`
-    });
+      addToast({
+        type: 'success',
+        title: 'Stock Adjusted',
+        message: `${adjType} recorded for ${med.name} (Batch: ${batch.batchNumber}).`
+      });
 
-    setIsAdjustModalOpen(false);
-    loadData();
+      setIsAdjustModalOpen(false);
+      loadAll();
+    } catch (err) {
+      addToast({
+        type: 'error',
+        title: 'Adjustment Not Saved',
+        message: err instanceof ApiError ? err.message : 'Failed to record stock adjustment.'
+      });
+    } finally {
+      setIsAdjusting(false);
+    }
   };
 
   const selectedAdjMed = medicines.find(m => m.id === adjMedId);
@@ -136,7 +240,7 @@ export const InventoryPage: React.FC = () => {
             variant="outline"
             size="sm"
             leftIcon={<RefreshCw className="w-3.5 h-3.5" />}
-            onClick={loadData}
+            onClick={loadAll}
           >
             Refresh
           </Button>
@@ -181,7 +285,7 @@ export const InventoryPage: React.FC = () => {
         <div className="p-3.5 rounded-lg border border-slate-200 bg-white shadow-2xs">
           <span className="text-xs text-slate-500 font-medium">Expiring Soon (&lt;90d)</span>
           <div className="text-lg font-bold font-mono text-rose-600 mt-0.5">
-            {expiringBatches.length} batches
+            {expiryPagination?.total ?? expiryItems.length} batches
           </div>
           <span className="text-[11px] text-slate-400">Review for supplier return</span>
         </div>
@@ -193,9 +297,9 @@ export const InventoryPage: React.FC = () => {
         onChange={(tab) => setActiveTab(tab as any)}
         tabs={[
           { id: 'batches', label: 'All Batches', badge: allBatches.length },
-          { id: 'expiring', label: 'Near Expiry (<90d)', badge: expiringBatches.length },
-          { id: 'lowstock', label: 'Shortage & Reorders', badge: lowStockMedicines.length },
-          { id: 'movements', label: 'Audit Trail', badge: movements.length }
+          { id: 'expiring', label: 'Near Expiry (<90d)', badge: expiryPagination?.total ?? expiryItems.length },
+          { id: 'lowstock', label: 'Shortage & Reorders', badge: lowStockPagination?.total ?? lowStockItems.length },
+          { id: 'movements', label: 'Audit Trail', badge: movementsPagination?.total ?? movements.length }
         ]}
       />
 
@@ -206,14 +310,19 @@ export const InventoryPage: React.FC = () => {
             <div className="max-w-md">
               <Input
                 placeholder="Search batch #, medicine name, generic salt..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                value={batchSearch}
+                onChange={handleBatchSearchChange}
                 leftIcon={<Search className="w-4 h-4" />}
                 className="text-xs"
               />
             </div>
           </div>
 
+          {isMedicinesLoading ? (
+            <div className="p-10 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin" /></div>
+          ) : allBatches.length === 0 ? (
+            <div className="p-10 text-center text-xs text-slate-400">No batches match your search.</div>
+          ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
               <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
@@ -230,13 +339,7 @@ export const InventoryPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {allBatches
-                  .filter(b => {
-                    const q = (searchQuery || '').toLowerCase().trim();
-                    if (!q) return true;
-                    return (b.medicineName || '').toLowerCase().includes(q) || (b.batchNumber || '').toLowerCase().includes(q) || (b.genericName || '').toLowerCase().includes(q);
-                  })
-                  .map((b) => (
+                {allBatches.map((b) => (
                     <tr key={b.id} className="hover:bg-slate-50">
                       <td className="py-2.5 px-3.5">
                         <div className="font-semibold text-slate-900">{b.medicineName}</div>
@@ -265,12 +368,19 @@ export const InventoryPage: React.FC = () => {
               </tbody>
             </table>
           </div>
+          )}
         </div>
       )}
 
       {/* Near Expiry Tab */}
       {activeTab === 'expiring' && (
         <div className="rounded-xl border border-slate-200 bg-white overflow-hidden shadow-2xs">
+          {isExpiryLoading ? (
+            <div className="p-10 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin" /></div>
+          ) : expiryItems.length === 0 ? (
+            <div className="p-10 text-center text-xs text-slate-400">No batches expiring within 90 days.</div>
+          ) : (
+          <>
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
               <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
@@ -285,21 +395,19 @@ export const InventoryPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {expiringBatches.map((b) => {
-                  const days = Math.ceil((new Date(b.expiryDate).getTime() - new Date().getTime()) / (1000 * 3600 * 24));
-                  return (
-                    <tr key={b.id} className="hover:bg-slate-50">
+                {expiryItems.map((b) => (
+                    <tr key={`${b.medicineId}-${b.batchId}`} className="hover:bg-slate-50">
                       <td className="py-2.5 px-3.5 font-semibold text-slate-900">{b.medicineName}</td>
                       <td className="py-2.5 px-3.5 font-mono">{b.batchNumber}</td>
                       <td className="py-2.5 px-3.5 font-mono font-bold text-rose-600">{b.expiryDate}</td>
                       <td className="py-2.5 px-3.5">
-                        <Badge variant={days <= 30 ? 'danger' : 'warning'} size="sm">
-                          {days} days left
+                        <Badge variant={b.daysRemaining <= 30 ? 'danger' : 'warning'} size="sm">
+                          {b.daysRemaining} days left
                         </Badge>
                       </td>
                       <td className="py-2.5 px-3.5 text-right font-mono font-bold">{b.quantity}</td>
                       <td className="py-2.5 px-3.5 text-right font-mono font-bold text-rose-600">
-                        {formatINR(b.quantity * b.purchasePrice)}
+                        {formatINR(b.lossExposure)}
                       </td>
                       <td className="py-2.5 px-3.5 text-center">
                         <Button
@@ -307,8 +415,9 @@ export const InventoryPage: React.FC = () => {
                           size="xs"
                           onClick={() => {
                             setAdjMedId(b.medicineId);
-                            setAdjBatchId(b.id);
+                            setAdjBatchId(b.batchId);
                             setAdjType('Mark Expired');
+                            setAdjQty(String(b.quantity));
                             setIsAdjustModalOpen(true);
                           }}
                         >
@@ -316,17 +425,25 @@ export const InventoryPage: React.FC = () => {
                         </Button>
                       </td>
                     </tr>
-                  );
-                })}
+                  ))}
               </tbody>
             </table>
           </div>
+          {expiryPagination && <Pagination pagination={expiryPagination} onPageChange={setExpiryPage} itemLabel="batches" />}
+          </>
+          )}
         </div>
       )}
 
       {/* Low Stock Tab */}
       {activeTab === 'lowstock' && (
         <div className="rounded-xl border border-slate-200 bg-white overflow-hidden shadow-2xs">
+          {isLowStockLoading ? (
+            <div className="p-10 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin" /></div>
+          ) : lowStockItems.length === 0 ? (
+            <div className="p-10 text-center text-xs text-slate-400">All active medicines are sufficiently stocked above reorder thresholds.</div>
+          ) : (
+          <>
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
               <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
@@ -339,7 +456,7 @@ export const InventoryPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {lowStockMedicines.map((m) => (
+                {lowStockItems.map((m) => (
                   <tr key={m.id} className="hover:bg-slate-50">
                     <td className="py-2.5 px-3.5">
                       <div className="font-semibold text-slate-900">{m.name}</div>
@@ -362,12 +479,21 @@ export const InventoryPage: React.FC = () => {
               </tbody>
             </table>
           </div>
+          {lowStockPagination && <Pagination pagination={lowStockPagination} onPageChange={setLowStockPage} itemLabel="medicines" />}
+          </>
+          )}
         </div>
       )}
 
       {/* Movement Ledger Tab */}
       {activeTab === 'movements' && (
         <div className="rounded-xl border border-slate-200 bg-white overflow-hidden shadow-2xs">
+          {isMovementsLoading ? (
+            <div className="p-10 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin" /></div>
+          ) : movements.length === 0 ? (
+            <div className="p-10 text-center text-xs text-slate-400">No stock movements recorded yet.</div>
+          ) : (
+          <>
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
               <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
@@ -383,40 +509,43 @@ export const InventoryPage: React.FC = () => {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {movements.map((mov) => (
-                  <tr key={mov.id} className="hover:bg-slate-50">
-                    <td className="py-2.5 px-3.5 font-mono text-slate-500">
-                      {formatDate(mov.date)} {formatTime(mov.date)}
-                    </td>
-                    <td className="py-2.5 px-3.5">
-                      <span className="font-semibold text-slate-900">{mov.medicineName}</span>
-                      <span className="text-[11px] text-slate-400 font-mono ml-1.5">({mov.batchNumber})</span>
-                    </td>
-                    <td className="py-2.5 px-3.5">
-                      <Badge
-                        variant={mov.type === 'Sale' ? 'default' : mov.type === 'Purchase' ? 'success' : mov.type === 'Return' ? 'info' : 'warning'}
-                        size="sm"
-                      >
-                        {mov.type}
-                      </Badge>
-                    </td>
-                    <td className="py-2.5 px-3.5 text-right font-mono font-bold">
-                      <span className={mov.quantityChange > 0 ? 'text-emerald-700' : 'text-rose-600'}>
-                        {mov.quantityChange > 0 ? `+${mov.quantityChange}` : mov.quantityChange}
-                      </span>
-                    </td>
-                    <td className="py-2.5 px-3.5 text-right font-mono text-slate-500">
-                      {mov.previousStock} → {mov.newStock}
-                    </td>
-                    <td className="py-2.5 px-3.5 text-slate-600">
-                      <div>{mov.user}</div>
-                      {mov.referenceId && <div className="text-[10px] text-slate-400 font-mono">{mov.referenceId}</div>}
-                    </td>
-                    <td className="py-2.5 px-3.5 text-slate-500 max-w-xs truncate">{mov.notes || '-'}</td>
-                  </tr>
-                ))}
+                    <tr key={mov.id} className="hover:bg-slate-50">
+                      <td className="py-2.5 px-3.5 font-mono text-slate-500">
+                        {formatDate(mov.date)} {formatTime(mov.date)}
+                      </td>
+                      <td className="py-2.5 px-3.5">
+                        <span className="font-semibold text-slate-900">{mov.medicineName}</span>
+                        <span className="text-[11px] text-slate-400 font-mono ml-1.5">({mov.batchNumber})</span>
+                      </td>
+                      <td className="py-2.5 px-3.5">
+                        <Badge
+                          variant={mov.type === 'Sale' ? 'default' : mov.type === 'Purchase' ? 'success' : mov.type === 'Return' ? 'info' : 'warning'}
+                          size="sm"
+                        >
+                          {mov.type}
+                        </Badge>
+                      </td>
+                      <td className="py-2.5 px-3.5 text-right font-mono font-bold">
+                        <span className={mov.quantityChange > 0 ? 'text-emerald-700' : 'text-rose-600'}>
+                          {mov.quantityChange > 0 ? `+${mov.quantityChange}` : mov.quantityChange}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3.5 text-right font-mono text-slate-500">
+                        {mov.previousStock} → {mov.newStock}
+                      </td>
+                      <td className="py-2.5 px-3.5 text-slate-600">
+                        <div>{mov.user}</div>
+                        {mov.referenceId && <div className="text-[10px] text-slate-400 font-mono">{mov.referenceId}</div>}
+                      </td>
+                      <td className="py-2.5 px-3.5 text-slate-500 max-w-xs truncate">{mov.notes || '-'}</td>
+                    </tr>
+                  ))}
               </tbody>
             </table>
           </div>
+          {movementsPagination && <Pagination pagination={movementsPagination} onPageChange={setMovementsPage} itemLabel="movements" />}
+          </>
+          )}
         </div>
       )}
 
@@ -503,10 +632,10 @@ export const InventoryPage: React.FC = () => {
           />
 
           <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
-            <Button type="button" variant="outline" size="sm" onClick={() => setIsAdjustModalOpen(false)}>
+            <Button type="button" variant="outline" size="sm" onClick={() => setIsAdjustModalOpen(false)} disabled={isAdjusting}>
               Cancel
             </Button>
-            <Button type="submit" variant="primary" size="sm">
+            <Button type="submit" variant="primary" size="sm" isLoading={isAdjusting}>
               Confirm Adjustment
             </Button>
           </div>
@@ -515,4 +644,3 @@ export const InventoryPage: React.FC = () => {
     </div>
   );
 };
-

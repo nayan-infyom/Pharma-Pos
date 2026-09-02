@@ -7,6 +7,13 @@ import { salesRouter } from './sales.route';
 import { customerRouter } from './customer.route';
 import { supplierRouter } from './supplier.route';
 import { purchaseRouter } from './purchase.route';
+import { prescriptionRouter } from './prescription.route';
+import { returnRouter } from './return.route';
+import { expenseRouter } from './expense.route';
+import { reportRouter } from './report.route';
+import { employeeRouter } from './employee.route';
+import { settingsRouter } from './settings.route';
+import { heldSaleRouter } from './heldSale.route';
 
 export const apiRouter = Router();
 
@@ -18,6 +25,10 @@ apiRouter.use('/sales', salesRouter);
 apiRouter.use('/customers', customerRouter);
 apiRouter.use('/suppliers', supplierRouter);
 apiRouter.use('/purchases', purchaseRouter);
-
-// Resource routers (prescriptions, returns, expenses, employees, settings,
-// reports) are mounted here incrementally in later phases.
+apiRouter.use('/prescriptions', prescriptionRouter);
+apiRouter.use('/returns', returnRouter);
+apiRouter.use('/expenses', expenseRouter);
+apiRouter.use('/reports', reportRouter);
+apiRouter.use('/employees', employeeRouter);
+apiRouter.use('/settings', settingsRouter);
+apiRouter.use('/held-sales', heldSaleRouter);

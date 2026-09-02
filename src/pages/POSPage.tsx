@@ -45,6 +45,7 @@ export const POSPage: React.FC = () => {
     setDoctorName,
     setCartDiscountPercent,
     holdSale,
+    loadHeldSales,
     openPayment,
     getSubtotal,
     getTotalDiscount,
@@ -76,11 +77,45 @@ export const POSPage: React.FC = () => {
     currentBatchId: ''
   });
 
+  const [isHoldingSale, setIsHoldingSale] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  const handleHoldSale = async () => {
+    if (cart.length === 0 || isHoldingSale) return;
+    setIsHoldingSale(true);
+    try {
+      await holdSale();
+      addToast({
+        type: 'info',
+        title: 'Cart Held',
+        message: 'Transaction saved to Held Carts drawer (F9).'
+      });
+    } catch (err) {
+      addToast({
+        type: 'error',
+        title: 'Could Not Hold Cart',
+        message: err instanceof Error ? err.message : 'Failed to park this cart.'
+      });
+    } finally {
+      setIsHoldingSale(false);
+    }
+  };
 
   useEffect(() => {
     loadMedicines();
   }, [selectedCategory]);
+
+  useEffect(() => {
+    loadHeldSales();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    };
+  }, []);
 
   // Hotkey listener for F2 (Focus search), F4 (Customer modal), F8 (Hold), F9 (Held Drawer), F6 (Pay)
   useEffect(() => {
@@ -94,14 +129,7 @@ export const POSPage: React.FC = () => {
         setCustomerModalOpen(true);
       } else if (e.key === 'F8') {
         e.preventDefault();
-        if (cart.length > 0) {
-          holdSale();
-          addToast({
-            type: 'info',
-            title: 'Cart Held',
-            message: 'Transaction saved to Held Carts drawer.'
-          });
-        }
+        handleHoldSale();
       } else if (e.key === 'F9') {
         e.preventDefault();
         setHeldDrawerOpen(true);
@@ -126,20 +154,36 @@ export const POSPage: React.FC = () => {
     setIsLoading(false);
   };
 
-  const handleSearchChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Debounced so each keystroke doesn't fire a network request against the
+  // real search API (was a free client-side array scan before Phase K).
+  const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setSearchQuery(val);
-    let results = await medicineService.search(val);
-    if (selectedCategory !== 'All') {
-      results = results.filter(m => m.category === selectedCategory);
-    }
-    setMedicines(results);
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = setTimeout(async () => {
+      let results = await medicineService.search(val);
+      if (selectedCategory !== 'All') {
+        results = results.filter(m => m.category === selectedCategory);
+      }
+      setMedicines(results);
+    }, 300);
   };
 
-  // Barcode enter scanner handler
-  const handleBarcodeOrEnter = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter' && medicines.length > 0) {
-      const first = medicines[0];
+  // Barcode enter scanner handler. Flushes any pending debounced search
+  // immediately so a fast scan-then-Enter doesn't act on stale results.
+  const handleBarcodeOrEnter = async (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== 'Enter') return;
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    let results = medicines;
+    if (searchQuery) {
+      results = await medicineService.search(searchQuery);
+      if (selectedCategory !== 'All') {
+        results = results.filter(m => m.category === selectedCategory);
+      }
+      setMedicines(results);
+    }
+    if (results.length > 0) {
+      const first = results[0];
       if (first.totalStock > 0) {
         addItem(first);
         addToast({
@@ -595,14 +639,8 @@ export const POSPage: React.FC = () => {
               variant="outline"
               size="md"
               disabled={cart.length === 0}
-              onClick={() => {
-                holdSale();
-                addToast({
-                  type: 'info',
-                  title: 'Cart Held',
-                  message: 'Transaction saved to Held Carts drawer (F9).'
-                });
-              }}
+              isLoading={isHoldingSale}
+              onClick={handleHoldSale}
               className="text-xs font-semibold"
             >
               Hold (F8)

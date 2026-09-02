@@ -54,3 +54,4 @@ prescriptionSchema.index({ prescribedDate: -1 });
 toJSONPlugin(prescriptionSchema);
 
 export const Prescription = model('Prescription', prescriptionSchema);
+export type PrescriptionDoc = InstanceType<typeof Prescription>;

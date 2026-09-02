@@ -4,21 +4,26 @@ import { prescriptionService } from '../services/prescriptionService';
 import { customerService } from '../services/customerService';
 import { medicineService } from '../services/medicineService';
 import { Prescription, Customer, Medicine, PrescriptionItem } from '../types';
+import { ApiError, Pagination as PaginationMeta } from '../api/client';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { Badge } from '../components/ui/Badge';
 import { Modal } from '../components/ui/Modal';
 import { Drawer } from '../components/ui/Drawer';
-import { 
-  Search, 
-  Plus, 
-  FileText, 
-  ShoppingCart, 
-  Trash2
+import { Pagination } from '../components/ui/Pagination';
+import {
+  Search,
+  Plus,
+  FileText,
+  ShoppingCart,
+  Trash2,
+  Loader2
 } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import { usePOSStore } from '../store/usePOSStore';
 import { formatDate } from '../utils/formatters';
+
+const PAGE_SIZE = 20;
 
 export const PrescriptionsPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -27,12 +32,19 @@ export const PrescriptionsPage: React.FC = () => {
   const { setCustomer, setDoctorName, addItem, clearCart } = usePOSStore();
 
   const [prescriptions, setPrescriptions] = useState<Prescription[]>([]);
+  const [pagination, setPagination] = useState<PaginationMeta | null>(null);
+  const [page, setPage] = useState(1);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [medicines, setMedicines] = useState<Medicine[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState('All');
+  const [statusFilter, setStatusFilter] = useState<Prescription['status'] | 'All'>('All');
   const [selectedRx, setSelectedRx] = useState<Prescription | null>(null);
   const [isNewRxOpen, setIsNewRxOpen] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
+  const [isDispensing, setIsDispensing] = useState(false);
 
   // New Rx form state
   const [rxPatientId, setRxPatientId] = useState('');
@@ -40,6 +52,7 @@ export const PrescriptionsPage: React.FC = () => {
   const [rxDoctorReg, setRxDoctorReg] = useState('REG-MD-9921');
   const [rxHospital, setRxHospital] = useState('Galleria Specialty Clinic');
   const [rxDiagnosis, setRxDiagnosis] = useState('');
+  const [rxExpiryDate, setRxExpiryDate] = useState('');
   const [rxNotes, setRxNotes] = useState('');
   const [rxItems, setRxItems] = useState<PrescriptionItem[]>([]);
 
@@ -51,24 +64,40 @@ export const PrescriptionsPage: React.FC = () => {
   const [itemInstructions, setItemInstructions] = useState('Complete full antibiotic course');
 
   useEffect(() => {
-    loadData();
+    Promise.all([customerService.getAll(), medicineService.getAll()]).then(([custList, medList]) => {
+      setCustomers(custList);
+      setMedicines(medList);
+      if (custList.length > 0) setRxPatientId(custList[0].id);
+      if (medList.length > 0) setItemMedId(medList[0].id);
+    });
     if (searchParams.get('action') === 'new') {
       setIsNewRxOpen(true);
       setSearchParams({});
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const loadData = async () => {
-    const [rxList, custList, medList] = await Promise.all([
-      prescriptionService.getAll(),
-      customerService.getAll(),
-      medicineService.getAll()
-    ]);
-    setPrescriptions(rxList);
-    setCustomers(custList);
-    setMedicines(medList);
-    if (custList.length > 0) setRxPatientId(custList[0].id);
-    if (medList.length > 0) setItemMedId(medList[0].id);
+  useEffect(() => {
+    loadPrescriptions(page, statusFilter);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, statusFilter]);
+
+  const loadPrescriptions = async (targetPage: number, status: Prescription['status'] | 'All') => {
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      const { items, pagination: p } = await prescriptionService.list({
+        status: status === 'All' ? undefined : status,
+        page: targetPage,
+        limit: PAGE_SIZE
+      });
+      setPrescriptions(items);
+      setPagination(p);
+    } catch (err) {
+      setLoadError(err instanceof ApiError ? err.message : 'Failed to load prescriptions.');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleAddRxItem = () => {
@@ -99,6 +128,7 @@ export const PrescriptionsPage: React.FC = () => {
 
   const handleCreatePrescription = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isCreating) return;
     if (rxItems.length === 0) {
       addToast({
         type: 'error',
@@ -111,71 +141,100 @@ export const PrescriptionsPage: React.FC = () => {
     const patient = customers.find(c => c.id === rxPatientId);
     if (!patient) return;
 
-    const created = await prescriptionService.create({
-      customerId: patient.id,
-      customerName: patient.name,
-      doctorName: rxDoctorName.trim(),
-      doctorRegistrationNumber: rxDoctorReg.trim(),
-      hospitalClinic: rxHospital.trim(),
-      diagnosis: rxDiagnosis.trim() || 'Acute Clinical Assessment',
-      prescribedDate: new Date().toISOString().split('T')[0],
-      expiryDate: '2027-01-01',
-      status: 'Pending',
-      items: rxItems,
-      refillsAllowed: 2,
-      refillsRemaining: 2,
-      notes: rxNotes
-    });
+    setIsCreating(true);
+    try {
+      const created = await prescriptionService.create({
+        customerId: patient.id,
+        patientName: patient.name,
+        patientPhone: patient.phone,
+        doctorName: rxDoctorName.trim(),
+        doctorRegistrationNumber: rxDoctorReg.trim() || undefined,
+        hospitalClinic: rxHospital.trim() || undefined,
+        diagnosis: rxDiagnosis.trim() || undefined,
+        expiryDate: rxExpiryDate || undefined,
+        items: rxItems,
+        refillsAllowed: 2,
+        notes: rxNotes || undefined
+      });
 
-    addToast({
-      type: 'success',
-      title: 'Prescription Saved',
-      message: `Rx #${created.id} registered for patient.`
-    });
+      addToast({
+        type: 'success',
+        title: 'Prescription Saved',
+        message: `${created.prescriptionNumber} registered for ${patient.name}.`
+      });
 
-    setIsNewRxOpen(false);
-    setRxItems([]);
-    loadData();
+      setIsNewRxOpen(false);
+      setRxItems([]);
+      setRxDiagnosis('');
+      setRxExpiryDate('');
+      setRxNotes('');
+      setPage(1);
+      loadPrescriptions(1, statusFilter);
+    } catch (err) {
+      addToast({
+        type: 'error',
+        title: 'Could Not Save Prescription',
+        message: err instanceof ApiError ? err.message : 'Failed to create prescription.'
+      });
+    } finally {
+      setIsCreating(false);
+    }
   };
 
   const handleDispenseInPOS = async (rx: Prescription) => {
-    const patient = customers.find(c => c.id === rx.customerId);
-    clearCart();
-    if (patient) {
-      setCustomer(patient);
-    }
-    if (rx.doctorName) {
-      setDoctorName(rx.doctorName);
-    }
-
-    for (const item of rx.items || []) {
-      const med = medicines.find(m => m.id === item.medicineId || (m.name && item.medicineName && m.name.toLowerCase() === item.medicineName.toLowerCase()));
-      if (med) {
-        addItem(med, undefined, item.quantity);
+    if (isDispensing) return;
+    setIsDispensing(true);
+    try {
+      const patient = customers.find(c => c.id === rx.customerId);
+      clearCart();
+      if (patient) {
+        setCustomer(patient);
       }
+      if (rx.doctorName) {
+        setDoctorName(rx.doctorName);
+      }
+
+      for (const item of rx.items || []) {
+        const med = medicines.find(m => m.id === item.medicineId || (m.name && item.medicineName && m.name.toLowerCase() === item.medicineName.toLowerCase()));
+        if (med) {
+          addItem(med, undefined, item.quantity);
+        }
+      }
+
+      // No terminal-status rule server-side, matching the original frontend
+      // behavior exactly — this always sets 'Dispensed' with no guard.
+      await prescriptionService.updateStatus(rx.id, 'Dispensed');
+
+      addToast({
+        type: 'success',
+        title: 'Rx Loaded in POS',
+        message: `Prescribed drugs loaded into POS terminal for ${rx.customerName || rx.patientName}.`
+      });
+
+      navigate('/pos');
+    } catch (err) {
+      addToast({
+        type: 'error',
+        title: 'Could Not Dispense',
+        message: err instanceof ApiError ? err.message : 'Failed to update prescription status.'
+      });
+    } finally {
+      setIsDispensing(false);
     }
-
-    addToast({
-      type: 'success',
-      title: 'Rx Loaded in POS',
-      message: `Prescribed drugs loaded into POS terminal for ${rx.customerName || rx.patientName || 'Patient'}.`
-    });
-
-    await prescriptionService.updateStatus(rx.id, 'Dispensed');
-    navigate('/pos');
   };
 
+  // Free-text search has no backend index for this endpoint (only
+  // customerId/status are server-filterable) — refined client-side over the
+  // current loaded page, same documented pattern as other capped list reads.
   const filteredPrescriptions = prescriptions.filter(rx => {
     const q = (searchQuery || '').toLowerCase().trim();
-    const matchesSearch =
-      !q ||
+    if (!q) return true;
+    return (
       (rx.customerName || rx.patientName || '').toLowerCase().includes(q) ||
       (rx.doctorName || '').toLowerCase().includes(q) ||
-      (rx.id || '').toLowerCase().includes(q) ||
-      (rx.diagnosis && rx.diagnosis.toLowerCase().includes(q));
-
-    const matchesStatus = statusFilter === 'All' || rx.status === statusFilter;
-    return matchesSearch && matchesStatus;
+      rx.prescriptionNumber.toLowerCase().includes(q) ||
+      (rx.diagnosis && rx.diagnosis.toLowerCase().includes(q))
+    );
   });
 
   return (
@@ -206,13 +265,13 @@ export const PrescriptionsPage: React.FC = () => {
         <div className="p-3.5 rounded-lg border border-slate-200 bg-white shadow-2xs">
           <span className="text-xs text-slate-500 font-medium">Prescriptions Logged</span>
           <div className="text-lg font-bold font-mono text-slate-900 mt-0.5">
-            {prescriptions.length} Records
+            {pagination?.total ?? prescriptions.length} Records
           </div>
           <span className="text-[11px] text-slate-400">Total doctor prescriptions</span>
         </div>
 
         <div className="p-3.5 rounded-lg border border-slate-200 bg-white shadow-2xs">
-          <span className="text-xs text-slate-500 font-medium">Pending Dispense</span>
+          <span className="text-xs text-slate-500 font-medium">Pending Dispense (this page)</span>
           <div className="text-lg font-bold font-mono text-amber-700 mt-0.5">
             {prescriptions.filter(p => p.status === 'Pending').length} Pending
           </div>
@@ -220,7 +279,7 @@ export const PrescriptionsPage: React.FC = () => {
         </div>
 
         <div className="p-3.5 rounded-lg border border-slate-200 bg-white shadow-2xs">
-          <span className="text-xs text-slate-500 font-medium">Dispensed & Completed</span>
+          <span className="text-xs text-slate-500 font-medium">Dispensed (this page)</span>
           <div className="text-lg font-bold font-mono text-emerald-700 mt-0.5">
             {prescriptions.filter(p => p.status === 'Dispensed').length} Fulfilled
           </div>
@@ -232,7 +291,7 @@ export const PrescriptionsPage: React.FC = () => {
       <div className="p-3 rounded-xl border border-slate-200 bg-white shadow-2xs flex flex-col sm:flex-row gap-2.5">
         <div className="flex-1">
           <Input
-            placeholder="Search by patient name, doctor, diagnosis, Rx ID..."
+            placeholder="Search patient name, doctor, diagnosis, Rx # (current page)..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             leftIcon={<Search className="w-4 h-4" />}
@@ -242,23 +301,36 @@ export const PrescriptionsPage: React.FC = () => {
 
         <select
           value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
+          onChange={(e) => { setStatusFilter(e.target.value as Prescription['status'] | 'All'); setPage(1); }}
           className="h-9 px-2.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-700"
         >
           <option value="All">All Dispensing Statuses</option>
           <option value="Pending">Pending Dispensing</option>
+          <option value="Active">Active</option>
           <option value="Dispensed">Dispensed (Fulfilled)</option>
           <option value="Partially Dispensed">Partially Dispensed</option>
+          <option value="Expired">Expired</option>
         </select>
       </div>
 
       {/* Prescriptions Table */}
       <div className="rounded-xl border border-slate-200 bg-white overflow-hidden shadow-2xs">
+        {loadError ? (
+          <div className="p-6 text-center text-xs text-rose-600">
+            {loadError}{' '}
+            <button className="underline font-semibold" onClick={() => loadPrescriptions(page, statusFilter)}>Retry</button>
+          </div>
+        ) : isLoading ? (
+          <div className="p-10 flex items-center justify-center text-slate-400"><Loader2 className="w-5 h-5 animate-spin" /></div>
+        ) : filteredPrescriptions.length === 0 ? (
+          <div className="p-10 text-center text-xs text-slate-400">No prescriptions match your search.</div>
+        ) : (
+        <>
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
               <tr>
-                <th className="py-2.5 px-3.5 font-semibold">Rx ID</th>
+                <th className="py-2.5 px-3.5 font-semibold">Rx #</th>
                 <th className="py-2.5 px-3.5 font-semibold">Patient Name</th>
                 <th className="py-2.5 px-3.5 font-semibold">Prescribing Physician</th>
                 <th className="py-2.5 px-3.5 font-semibold">Date</th>
@@ -271,10 +343,10 @@ export const PrescriptionsPage: React.FC = () => {
               {filteredPrescriptions.map((rx) => (
                 <tr key={rx.id} className="hover:bg-slate-50 transition-colors">
                   <td className="py-2.5 px-3.5 font-mono font-semibold text-slate-900">
-                    {rx.id}
+                    {rx.prescriptionNumber}
                   </td>
                   <td className="py-2.5 px-3.5">
-                    <div className="font-semibold text-slate-900">{rx.customerName}</div>
+                    <div className="font-semibold text-slate-900">{rx.customerName || rx.patientName}</div>
                     <div className="text-[10px] text-slate-400">{rx.diagnosis || 'Clinical Rx'}</div>
                   </td>
                   <td className="py-2.5 px-3.5">
@@ -283,12 +355,12 @@ export const PrescriptionsPage: React.FC = () => {
                   </td>
                   <td className="py-2.5 px-3.5 font-mono text-slate-500">{formatDate(rx.prescribedDate)}</td>
                   <td className="py-2.5 px-3.5">
-                    <Badge variant={rx.status === 'Dispensed' ? 'success' : 'warning'} size="sm">
+                    <Badge variant={rx.status === 'Dispensed' ? 'success' : rx.status === 'Expired' ? 'danger' : 'warning'} size="sm">
                       {rx.status}
                     </Badge>
                   </td>
                   <td className="py-2.5 px-3.5 text-right font-mono font-semibold">
-                    {(rx.items?.length || rx.medicines?.length || 0)} meds
+                    {(rx.items?.length || 0)} meds
                   </td>
                   <td className="py-2.5 px-3.5 text-center">
                     <div className="flex items-center justify-center gap-1">
@@ -305,6 +377,7 @@ export const PrescriptionsPage: React.FC = () => {
                         variant="primary"
                         size="xs"
                         leftIcon={<ShoppingCart className="w-3.5 h-3.5" />}
+                        isLoading={isDispensing}
                         onClick={() => handleDispenseInPOS(rx)}
                       >
                         Dispense
@@ -316,6 +389,9 @@ export const PrescriptionsPage: React.FC = () => {
             </tbody>
           </table>
         </div>
+        {pagination && <Pagination pagination={pagination} onPageChange={setPage} itemLabel="prescriptions" />}
+        </>
+        )}
       </div>
 
       {/* Inspect Prescription Drawer */}
@@ -323,8 +399,8 @@ export const PrescriptionsPage: React.FC = () => {
         <Drawer
           isOpen={!!selectedRx}
           onClose={() => setSelectedRx(null)}
-          title={`Prescription #${selectedRx.id}`}
-          description={`Patient: ${selectedRx.customerName} • Date: ${formatDate(selectedRx.prescribedDate)}`}
+          title={`Prescription ${selectedRx.prescriptionNumber}`}
+          description={`Patient: ${selectedRx.customerName || selectedRx.patientName} • Date: ${formatDate(selectedRx.prescribedDate)}`}
           width="lg"
         >
           <div className="space-y-3.5 text-xs">
@@ -333,22 +409,28 @@ export const PrescriptionsPage: React.FC = () => {
                 <div>
                   <span className="text-slate-500">Doctor:</span>
                   <p className="font-semibold text-slate-900">{selectedRx.doctorName}</p>
-                  <p className="text-[10px] text-slate-500 font-mono">Reg: {selectedRx.doctorRegistrationNumber}</p>
+                  <p className="text-[10px] text-slate-500 font-mono">Reg: {selectedRx.doctorRegistrationNumber || 'N/A'}</p>
                 </div>
                 <div className="text-right">
                   <span className="text-slate-500">Clinic / Hospital:</span>
-                  <p className="font-semibold text-slate-900">{selectedRx.hospitalClinic}</p>
+                  <p className="font-semibold text-slate-900">{selectedRx.hospitalClinic || 'N/A'}</p>
                 </div>
               </div>
               <div className="border-t border-slate-200 pt-2 text-[11px] text-slate-500">
                 <span>Clinical Diagnosis: </span>
-                <span className="font-semibold text-slate-800">{selectedRx.diagnosis}</span>
+                <span className="font-semibold text-slate-800">{selectedRx.diagnosis || 'Not specified'}</span>
               </div>
+              {selectedRx.expiryDate && (
+                <div className="text-[11px] text-slate-500">
+                  <span>Prescription Expiry: </span>
+                  <span className="font-semibold text-slate-800">{formatDate(selectedRx.expiryDate)}</span>
+                </div>
+              )}
             </div>
 
             <div>
               <h4 className="font-semibold text-slate-900 mb-2">
-                Prescribed Drug Regimen ({(selectedRx.items?.length || selectedRx.medicines?.length || 0)} items)
+                Prescribed Drug Regimen ({selectedRx.items?.length || 0} items)
               </h4>
               <div className="space-y-2">
                 {(selectedRx.items || []).map((item, idx) => (
@@ -381,6 +463,7 @@ export const PrescriptionsPage: React.FC = () => {
                 variant="primary"
                 size="sm"
                 leftIcon={<ShoppingCart className="w-3.5 h-3.5" />}
+                isLoading={isDispensing}
                 onClick={() => handleDispenseInPOS(selectedRx)}
               >
                 1-Click Dispense in POS
@@ -430,12 +513,21 @@ export const PrescriptionsPage: React.FC = () => {
             />
           </div>
 
-          <Input
-            label="Diagnosis / Medical Assessment"
-            placeholder="e.g. Upper Respiratory Tract Infection (URTI)"
-            value={rxDiagnosis}
-            onChange={(e) => setRxDiagnosis(e.target.value)}
-          />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <Input
+              label="Diagnosis / Medical Assessment"
+              placeholder="e.g. Upper Respiratory Tract Infection (URTI)"
+              value={rxDiagnosis}
+              onChange={(e) => setRxDiagnosis(e.target.value)}
+            />
+
+            <Input
+              label="Prescription Expiry (Optional)"
+              type="date"
+              value={rxExpiryDate}
+              onChange={(e) => setRxExpiryDate(e.target.value)}
+            />
+          </div>
 
           {/* Add Regimen Item Bar */}
           <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-2.5">
@@ -541,10 +633,10 @@ export const PrescriptionsPage: React.FC = () => {
           )}
 
           <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200">
-            <Button type="button" variant="outline" size="sm" onClick={() => setIsNewRxOpen(false)}>
+            <Button type="button" variant="outline" size="sm" onClick={() => setIsNewRxOpen(false)} disabled={isCreating}>
               Cancel
             </Button>
-            <Button type="submit" variant="primary" size="sm">
+            <Button type="submit" variant="primary" size="sm" isLoading={isCreating}>
               Save Prescription
             </Button>
           </div>

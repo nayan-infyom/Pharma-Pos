@@ -26,6 +26,9 @@ const employeeSchema = new Schema(
   { timestamps: true }
 );
 
+employeeSchema.index({ name: 'text', email: 'text' });
+
 toJSONPlugin(employeeSchema);
 
 export const Employee = model('Employee', employeeSchema);
+export type EmployeeDoc = InstanceType<typeof Employee>;

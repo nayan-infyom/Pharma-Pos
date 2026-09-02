@@ -1,37 +1,25 @@
 import { Expense } from '../types';
-import { initialExpenses } from '../data/expenses';
+import * as expensesApi from '../api/expenses';
+import { Pagination } from '../api/client';
 
-const STORAGE_KEY = 'pharmapos_expenses_v1';
-
+/** Phase K batch 4: backed by the real API — no parallel localStorage expense database. */
 class ExpenseService {
-  private expenses: Expense[];
-
-  constructor() {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    this.expenses = saved ? JSON.parse(saved) : initialExpenses;
-  }
-
-  private persist() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.expenses));
-  }
-
+  /** Capped at the backend's max page size (100) — see medicineService's identical, already-flagged limitation. */
   async getAll(): Promise<Expense[]> {
-    return [...this.expenses];
+    const { items } = await expensesApi.listExpenses({ limit: 100 });
+    return items;
   }
 
-  async create(data: Omit<Expense, 'id'>): Promise<Expense> {
-    const newExpense: Expense = {
-      ...data,
-      id: `exp-${Date.now()}`
-    };
-    this.expenses.unshift(newExpense);
-    this.persist();
-    return newExpense;
+  async list(params: expensesApi.ListExpensesParams = {}): Promise<{ items: Expense[]; pagination: Pagination }> {
+    return expensesApi.listExpenses(params);
+  }
+
+  async create(input: expensesApi.CreateExpenseRequest): Promise<Expense> {
+    return expensesApi.createExpense(input);
   }
 
   async delete(id: string): Promise<void> {
-    this.expenses = this.expenses.filter(e => e.id !== id);
-    this.persist();
+    await expensesApi.deleteExpense(id);
   }
 }
 

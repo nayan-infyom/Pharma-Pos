@@ -43,3 +43,4 @@ salesReturnSchema.index({ date: -1 });
 toJSONPlugin(salesReturnSchema);
 
 export const SalesReturn = model('SalesReturn', salesReturnSchema);
+export type SalesReturnDoc = InstanceType<typeof SalesReturn>;
