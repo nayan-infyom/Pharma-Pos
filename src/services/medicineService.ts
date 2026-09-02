@@ -1,149 +1,68 @@
 import { Medicine, Batch } from '../types';
-import { initialMedicines } from '../data/medicines';
+import * as medicinesApi from '../api/medicines';
 
-const STORAGE_KEY = 'pharmapos_medicines_v1';
-
+/**
+ * Phase K: backed by the real API instead of localStorage. Method names/
+ * signatures are preserved so pages don't need to change (per the approved
+ * "adapter, not rewrite" strategy) — internals now call src/api/medicines.ts.
+ *
+ * getAll()/search() request the max page size (100, the backend's own hot-path
+ * cap — see Phase E) rather than truly "all" medicines the way the old
+ * localStorage version did. At current seed-catalog scale this is invisible;
+ * flagged here as a known limitation until pages that browse the full catalog
+ * get real pagination controls (not yet done for every page in this
+ * checkpoint — see the Phase K report).
+ */
 class MedicineService {
-  private medicines: Medicine[];
-
-  constructor() {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        this.medicines = JSON.parse(saved);
-      } catch (e) {
-        this.medicines = initialMedicines;
-      }
-    } else {
-      this.medicines = initialMedicines;
-      this.persist();
-    }
-  }
-
-  private persist() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.medicines));
-  }
-
   async getAll(): Promise<Medicine[]> {
-    return [...this.medicines];
+    const { items } = await medicinesApi.listMedicines({ limit: 100 });
+    return items;
   }
 
   async getById(id: string): Promise<Medicine | undefined> {
-    return this.medicines.find(m => m.id === id);
+    try {
+      return await medicinesApi.getMedicineById(id);
+    } catch {
+      return undefined;
+    }
   }
 
+  /**
+   * Search semantics changed from the old client-side `.includes()` scan
+   * (which also matched sku/barcode/batchNumber) to server-side Atlas Search
+   * over name/genericName/brand/manufacturer (see Phase F's search writeup).
+   * Exact barcode/SKU lookups still work via their own dedicated endpoints.
+   */
   async search(query?: string): Promise<Medicine[]> {
-    const q = (query || '').toLowerCase().trim();
-    if (!q) return this.medicines;
-    return this.medicines.filter(m =>
-      (m.name || '').toLowerCase().includes(q) ||
-      (m.genericName || '').toLowerCase().includes(q) ||
-      (m.brand || '').toLowerCase().includes(q) ||
-      (m.sku || '').toLowerCase().includes(q) ||
-      (m.barcode || '').toLowerCase().includes(q) ||
-      (m.category || '').toLowerCase().includes(q) ||
-      (m.manufacturer || '').toLowerCase().includes(q) ||
-      (m.batches || []).some(b => (b.batchNumber || '').toLowerCase().includes(q))
-    );
+    const { items } = await medicinesApi.listMedicines({ search: query || undefined, limit: 100 });
+    return items;
   }
 
   async create(medicine: Omit<Medicine, 'id' | 'createdAt' | 'updatedAt' | 'totalStock'>): Promise<Medicine> {
-    const totalStock = (medicine.batches || []).reduce((acc, b) => acc + (b.quantity || 0), 0);
-    const newMedicine: Medicine = {
-      ...medicine,
-      id: `med-${Date.now()}`,
-      totalStock,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-    this.medicines.unshift(newMedicine);
-    this.persist();
-    return newMedicine;
+    return medicinesApi.createMedicine(medicine);
   }
 
   async update(id: string, updates: Partial<Medicine>): Promise<Medicine> {
-    const index = this.medicines.findIndex(m => m.id === id);
-    if (index === -1) throw new Error('Medicine not found');
-
-    const updatedBatches = updates.batches || this.medicines[index].batches;
-    const totalStock = updatedBatches.reduce((acc, b) => acc + (b.quantity || 0), 0);
-
-    const updated: Medicine = {
-      ...this.medicines[index],
-      ...updates,
-      totalStock,
-      updatedAt: new Date().toISOString()
-    };
-
-    this.medicines[index] = updated;
-    this.persist();
-    return updated;
+    return medicinesApi.updateMedicine(id, updates);
   }
 
+  /** Now archives (soft-delete) rather than a hard delete, matching the backend contract (Phase E). */
   async delete(id: string): Promise<boolean> {
-    const index = this.medicines.findIndex(m => m.id === id);
-    if (index === -1) return false;
-    this.medicines.splice(index, 1);
-    this.persist();
+    await medicinesApi.archiveMedicine(id);
     return true;
   }
 
   async addBatch(medicineId: string, batch: Omit<Batch, 'id' | 'medicineId'>): Promise<Batch> {
-    const med = await this.getById(medicineId);
-    if (!med) throw new Error('Medicine not found');
-
-    const newBatch: Batch = {
-      ...batch,
-      id: `bat-${Date.now()}`,
-      medicineId,
-      medicineName: med.name
-    };
-
-    med.batches.push(newBatch);
-    await this.update(medicineId, { batches: med.batches });
-    return newBatch;
+    const medicine = await medicinesApi.addBatch(medicineId, batch);
+    const created = medicine.batches[medicine.batches.length - 1];
+    return created;
   }
 
   async updateBatch(medicineId: string, batchId: string, updates: Partial<Batch>): Promise<Batch> {
-    const med = await this.getById(medicineId);
-    if (!med) throw new Error('Medicine not found');
-
-    const bIndex = med.batches.findIndex(b => b.id === batchId);
-    if (bIndex === -1) throw new Error('Batch not found');
-
-    med.batches[bIndex] = { ...med.batches[bIndex], ...updates };
-    await this.update(medicineId, { batches: med.batches });
-    return med.batches[bIndex];
-  }
-
-  // Deduct inventory when sale completes (FEFO order or specific batch)
-  async deductStock(medicineId: string, batchId: string, quantity: number): Promise<void> {
-    const med = await this.getById(medicineId);
-    if (!med) return;
-
-    const batch = med.batches.find(b => b.id === batchId);
-    if (batch) {
-      batch.quantity = Math.max(0, batch.quantity - quantity);
-      if (batch.quantity === 0) batch.status = 'Out of Stock';
-    }
-
-    await this.update(medicineId, { batches: med.batches });
-  }
-
-  // Restock when purchase is confirmed or sale return processed
-  async addStock(medicineId: string, batchId: string, quantity: number): Promise<void> {
-    const med = await this.getById(medicineId);
-    if (!med) return;
-
-    const batch = med.batches.find(b => b.id === batchId);
-    if (batch) {
-      batch.quantity += quantity;
-      if (batch.quantity > 0 && batch.status === 'Out of Stock') {
-        batch.status = 'Active';
-      }
-    }
-
-    await this.update(medicineId, { batches: med.batches });
+    const medicine = await medicinesApi.updateBatchMeta(medicineId, batchId, updates);
+    const updated = medicine.batches.find((b) => b.id === batchId);
+    if (!updated) throw new Error('Batch not found after update');
+    return updated;
   }
 }
 

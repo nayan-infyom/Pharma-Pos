@@ -10,9 +10,14 @@ import { usePOSStore } from '../../store/usePOSStore';
 
 export const AppLayout: React.FC = () => {
   const navigate = useNavigate();
-  const { openPayment, holdSale, isPaymentOpen } = usePOSStore();
+  const { openPayment, isPaymentOpen } = usePOSStore();
 
-  // Global POS hotkeys listener: F2 (POS), F6 (Payment), F8 (Hold), Alt+P (POS)
+  // Global POS hotkeys listener: F2 (POS), F6 (Payment), Alt+P (POS).
+  // F8 (Hold) is intentionally NOT handled here — POSPage.tsx owns it,
+  // since this global listener stays mounted on every route including
+  // /pos, and both firing for the same keypress double-held every parked
+  // cart (a real duplicate-write now that holding calls the backend,
+  // not just a redundant localStorage push).
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'F2') {
@@ -21,9 +26,6 @@ export const AppLayout: React.FC = () => {
       } else if (e.key === 'F6' && window.location.pathname === '/pos') {
         e.preventDefault();
         openPayment();
-      } else if (e.key === 'F8' && window.location.pathname === '/pos') {
-        e.preventDefault();
-        holdSale();
       } else if (e.altKey && e.key && e.key.toLowerCase() === 'p') {
         e.preventDefault();
         navigate('/pos');
@@ -38,7 +40,7 @@ export const AppLayout: React.FC = () => {
 
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [navigate, openPayment, holdSale, isPaymentOpen]);
+  }, [navigate, openPayment, isPaymentOpen]);
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col antialiased">

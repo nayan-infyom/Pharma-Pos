@@ -1,101 +1,92 @@
-import { SaleInvoice } from '../types';
-import { initialSales } from '../data/sales';
-import { medicineService } from './medicineService';
-import { customerService } from './customerService';
-import { inventoryService } from './inventoryService';
+import { SaleInvoice, PaymentMethod, SplitPaymentDetail } from '../types';
+import * as salesApi from '../api/sales';
 
-const STORAGE_KEY = 'pharmapos_sales_v1';
+/**
+ * Payload shape changed materially in Phase K, not just the internals: the
+ * old createSale() took an ALREADY-FULLY-PRICED SaleInvoice (batch already
+ * FEFO-assigned, every line's tax/discount pre-computed client-side) and
+ * just persisted it + mutated stock as a side effect. The new backend
+ * resolves FEFO and computes every rupee itself (Phase F) — it only accepts
+ * medicineId/quantity/discountPercent per line and returns the authoritative
+ * invoice. This is the one genuine frontend/backend contract mismatch this
+ * phase found that an internals-only adapter couldn't paper over; the
+ * PaymentModal call site was updated accordingly (see Phase K report).
+ */
+export interface CreateSaleInput {
+  items: { medicineId: string; quantity: number; discountPercent?: number }[];
+  customerId?: string;
+  doctorName?: string;
+  cartDiscountPercent?: number;
+  paymentMethod: PaymentMethod;
+  splitDetails?: SplitPaymentDetail[];
+  amountPaid: number;
+  notes?: string;
+}
+
+/** The frontend's PaymentMethod type keeps its legacy 'UPI/QR' label (no UI
+ *  change) — this is the one enum translation needed at the API boundary,
+ *  matching the canonical value the backend actually accepts (Phase C decision #3). */
+function toCanonicalPaymentMethod(method: PaymentMethod): string {
+  return method === 'UPI/QR' ? 'UPI' : method;
+}
+
+/**
+ * customerService/CustomerModal aren't migrated yet in this Phase K checkpoint
+ * — they still hand out legacy fake ids (e.g. usePOSStore's default "Walk-in
+ * Customer" placeholder is 'cust-01', from src/data/customers.ts). The
+ * backend only accepts a real Mongo ObjectId for customerId. Rather than
+ * send an id the server will always reject with a generic validation error,
+ * treat anything that isn't a 24-hex-char ObjectId as "no customer" (i.e.
+ * walk-in) — this is the correct behavior for the placeholder today, and
+ * will simply stop triggering once customerService is migrated to real ids.
+ * Known limitation: Credit/Khata sales against a specific customer don't
+ * work correctly until that migration lands (follow-on Phase K work).
+ */
+const OBJECT_ID_RE = /^[0-9a-fA-F]{24}$/;
+function toBackendCustomerId(id?: string): string | undefined {
+  return id && OBJECT_ID_RE.test(id) ? id : undefined;
+}
+
+function generateIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
 class SalesService {
-  private sales: SaleInvoice[];
-
-  constructor() {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        this.sales = JSON.parse(saved);
-      } catch (e) {
-        this.sales = initialSales;
-      }
-    } else {
-      this.sales = initialSales;
-      this.persist();
-    }
-  }
-
-  private persist() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.sales));
-  }
-
   async getAll(): Promise<SaleInvoice[]> {
-    return [...this.sales];
+    const { items } = await salesApi.listSales({ limit: 100 });
+    return items;
   }
 
   async getById(id: string): Promise<SaleInvoice | undefined> {
-    return this.sales.find(s => s.id === id);
+    try {
+      return await salesApi.getSaleById(id);
+    } catch {
+      return undefined;
+    }
   }
 
   async getByInvoiceNumber(invNum: string): Promise<SaleInvoice | undefined> {
-    return this.sales.find(s => s.invoiceNumber.toLowerCase() === invNum.toLowerCase());
+    // No dedicated lookup-by-invoice-number endpoint — the list endpoint is
+    // paginated/filterable but not by invoice number text; page 1 covers the
+    // common "just billed it" case. Full search-by-invoice-number is a
+    // follow-up (SalesPage isn't in this checkpoint's migrated scope yet).
+    const { items } = await salesApi.listSales({ limit: 100 });
+    return items.find((s) => s.invoiceNumber.toLowerCase() === invNum.toLowerCase());
   }
 
-  async createSale(saleData: Omit<SaleInvoice, 'id' | 'invoiceNumber' | 'date'>): Promise<SaleInvoice> {
-    const today = new Date();
-    const count = this.sales.length + 1001;
-    const invoiceNumber = `INV-${today.getFullYear()}-${count}`;
-
-    const newSale: SaleInvoice = {
-      ...saleData,
-      id: `sale-${Date.now()}`,
-      invoiceNumber,
-      date: new Date().toISOString()
-    };
-
-    // 1. Deduct stock for all items
-    for (const item of newSale.items) {
-      await medicineService.deductStock(item.medicineId, item.batchId, item.quantity);
-      
-      // Record stock movement
-      await inventoryService.recordMovement({
-        medicineId: item.medicineId,
-        medicineName: item.medicineName,
-        batchNumber: item.batchNumber,
-        type: 'Sale',
-        quantityChange: -item.quantity,
-        previousStock: item.availableBatchStock,
-        newStock: Math.max(0, item.availableBatchStock - item.quantity),
-        user: newSale.cashierName,
-        referenceId: invoiceNumber,
-        notes: `POS Sale to ${newSale.customerName}`
-      });
-    }
-
-    // 2. Record customer purchase
-    if (newSale.customerId) {
-      await customerService.recordPurchase(
-        newSale.customerId,
-        newSale.grandTotal,
-        newSale.paymentMethod === 'Credit'
-      );
-    }
-
-    this.sales.unshift(newSale);
-    this.persist();
-    return newSale;
-  }
-
-  async refundSale(saleId: string, refundedItems: { medicineId: string; batchId: string; quantity: number }[]): Promise<void> {
-    const sale = this.sales.find(s => s.id === saleId);
-    if (!sale) return;
-
-    sale.status = 'Refunded';
-    
-    // Add stock back
-    for (const item of refundedItems) {
-      await medicineService.addStock(item.medicineId, item.batchId, item.quantity);
-    }
-
-    this.persist();
+  async createSale(input: CreateSaleInput): Promise<SaleInvoice> {
+    return salesApi.createSale({
+      items: input.items,
+      customerId: toBackendCustomerId(input.customerId),
+      doctorName: input.doctorName,
+      cartDiscountPercent: input.cartDiscountPercent,
+      paymentMethod: toCanonicalPaymentMethod(input.paymentMethod),
+      splitDetails: input.splitDetails?.map((s) => ({ method: toCanonicalPaymentMethod(s.method as PaymentMethod), amount: s.amount, reference: s.reference })),
+      amountPaid: input.amountPaid,
+      notes: input.notes,
+      idempotencyKey: generateIdempotencyKey()
+    });
   }
 }
 

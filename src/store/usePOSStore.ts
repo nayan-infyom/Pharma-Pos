@@ -1,5 +1,9 @@
 import { create } from 'zustand';
 import { CartItem, Customer, HeldSale, Medicine, Batch, PaymentMethod, SplitPaymentDetail, SaleInvoice } from '../types';
+import { heldSalesService } from '../services/heldSalesService';
+import { customerService } from '../services/customerService';
+
+const OBJECT_ID_RE = /^[0-9a-fA-F]{24}$/;
 
 interface POSState {
   cart: CartItem[];
@@ -29,9 +33,11 @@ interface POSState {
   setCartDiscountPercent: (percent: number) => void;
 
   // Held sales
-  holdSale: (customName?: string) => void;
-  resumeSale: (heldSaleId: string) => void;
-  deleteHeldSale: (heldSaleId: string) => void;
+  isHeldSalesLoading: boolean;
+  loadHeldSales: () => Promise<void>;
+  holdSale: (customName?: string) => Promise<void>;
+  resumeSale: (heldSaleId: string) => Promise<void>;
+  deleteHeldSale: (heldSaleId: string) => Promise<void>;
 
   // Payment
   openPayment: () => void;
@@ -52,20 +58,6 @@ interface POSState {
   getGrandTotal: () => number;
 }
 
-const HELD_SALES_KEY = 'pharmapos_held_sales_v1';
-
-const getInitialHeldSales = (): HeldSale[] => {
-  const saved = localStorage.getItem(HELD_SALES_KEY);
-  if (saved) {
-    try {
-      return JSON.parse(saved);
-    } catch (e) {
-      return [];
-    }
-  }
-  return [];
-};
-
 export const usePOSStore = create<POSState>((set, get) => ({
   cart: [],
   customer: {
@@ -80,7 +72,8 @@ export const usePOSStore = create<POSState>((set, get) => ({
   },
   doctorName: '',
   cartDiscountPercent: 0,
-  heldSales: getInitialHeldSales(),
+  heldSales: [],
+  isHeldSalesLoading: false,
 
   isPaymentOpen: false,
   paymentMethod: 'Cash',
@@ -282,59 +275,79 @@ export const usePOSStore = create<POSState>((set, get) => ({
   setDoctorName: (doctorName) => set({ doctorName }),
   setCartDiscountPercent: (cartDiscountPercent) => set({ cartDiscountPercent: Math.min(100, Math.max(0, cartDiscountPercent)) }),
 
-  holdSale: (customName) => {
+  loadHeldSales: async () => {
+    set({ isHeldSalesLoading: true });
+    try {
+      const heldSales = await heldSalesService.list();
+      set({ heldSales });
+    } finally {
+      set({ isHeldSalesLoading: false });
+    }
+  },
+
+  holdSale: async (customName) => {
     const state = get();
     if (state.cart.length === 0) return;
 
     const subtotal = state.getSubtotal();
     const grandTotal = state.getGrandTotal();
     const taxTotal = state.getTaxTotal();
+    // Legacy walk-in placeholder ('cust-01') isn't a real customer record —
+    // same guard as salesService.createSale's toBackendCustomerId.
+    const isRealCustomer = !!state.customer?.id && OBJECT_ID_RE.test(state.customer.id);
 
-    const heldSale: HeldSale = {
-      id: `held-${Date.now()}`,
-      name: customName || (state.customer?.name ? `${state.customer.name}'s Cart` : `Held Cart #${state.heldSales.length + 1}`),
-      heldAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      customer: state.customer,
-      items: [...state.cart],
+    const created = await heldSalesService.hold({
+      name: customName || (isRealCustomer ? `${state.customer!.name}'s Cart` : `Held Cart #${state.heldSales.length + 1}`),
+      customerId: isRealCustomer ? state.customer!.id : undefined,
+      customerSnapshot: isRealCustomer ? { id: state.customer!.id, name: state.customer!.name, phone: state.customer!.phone } : undefined,
+      items: state.cart,
       subtotal,
       discountPercent: state.cartDiscountPercent,
       taxTotal,
       grandTotal
-    };
+    });
 
-    const newHeldSales = [heldSale, ...state.heldSales];
-    localStorage.setItem(HELD_SALES_KEY, JSON.stringify(newHeldSales));
-
-    set({
-      heldSales: newHeldSales,
+    set((s) => ({
+      heldSales: [created, ...s.heldSales],
       cart: [],
       doctorName: '',
       cartDiscountPercent: 0
-    });
+    }));
   },
 
-  resumeSale: (heldSaleId) => {
+  resumeSale: async (heldSaleId) => {
     const state = get();
     const target = state.heldSales.find(h => h.id === heldSaleId);
     if (!target) return;
 
-    const remaining = state.heldSales.filter(h => h.id !== heldSaleId);
-    localStorage.setItem(HELD_SALES_KEY, JSON.stringify(remaining));
+    // The resumed cart only ever reaches the real sale via medicineId/
+    // quantity/discountPercent (salesService.createSale) — server always
+    // re-resolves FEFO/batch/pricing fresh at that point, so nothing here
+    // (stale unitPrice/mrp/availableBatchStock in the snapshot) can bypass
+    // server-authoritative pricing or stock validation.
+    let freshCustomer: Customer | null = null;
+    if (target.customerId) {
+      freshCustomer = (await customerService.getById(target.customerId)) ?? null;
+    }
 
     set({
-      heldSales: remaining,
       cart: target.items,
-      customer: target.customer || null,
-      cartDiscountPercent: target.discountPercent || 0
+      customer: freshCustomer,
+      cartDiscountPercent: target.discountPercent || 0,
+      heldSales: state.heldSales.filter(h => h.id !== heldSaleId)
     });
+
+    try {
+      await heldSalesService.remove(heldSaleId);
+    } catch {
+      // Best-effort — the cart is already resumed locally either way; a
+      // failed cleanup just leaves a stale parked-cart row to discard later.
+    }
   },
 
-  deleteHeldSale: (heldSaleId) => {
-    set((state) => {
-      const remaining = state.heldSales.filter(h => h.id !== heldSaleId);
-      localStorage.setItem(HELD_SALES_KEY, JSON.stringify(remaining));
-      return { heldSales: remaining };
-    });
+  deleteHeldSale: async (heldSaleId) => {
+    await heldSalesService.remove(heldSaleId);
+    set((state) => ({ heldSales: state.heldSales.filter(h => h.id !== heldSaleId) }));
   },
 
   openPayment: () => {

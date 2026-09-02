@@ -1,6 +1,8 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AppLayout } from './components/layout/AppLayout';
+import { RequireAuth } from './components/layout/RequireAuth';
+import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { POSPage } from './pages/POSPage';
 import { SalesPage } from './pages/SalesPage';
@@ -20,22 +22,26 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={<AppLayout />}>
-          <Route index element={<DashboardPage />} />
-          <Route path="pos" element={<POSPage />} />
-          <Route path="sales" element={<SalesPage />} />
-          <Route path="inventory" element={<InventoryPage />} />
-          <Route path="medicines" element={<MedicinesPage />} />
-          <Route path="purchases" element={<PurchasesPage />} />
-          <Route path="customers" element={<CustomersPage />} />
-          <Route path="suppliers" element={<SuppliersPage />} />
-          <Route path="prescriptions" element={<PrescriptionsPage />} />
-          <Route path="returns" element={<ReturnsPage />} />
-          <Route path="expenses" element={<ExpensesPage />} />
-          <Route path="reports" element={<ReportsPage />} />
-          <Route path="employees" element={<EmployeesPage />} />
-          <Route path="settings" element={<SettingsPage />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
+        <Route path="/login" element={<LoginPage />} />
+
+        <Route element={<RequireAuth />}>
+          <Route path="/" element={<AppLayout />}>
+            <Route index element={<DashboardPage />} />
+            <Route path="pos" element={<POSPage />} />
+            <Route path="sales" element={<SalesPage />} />
+            <Route path="inventory" element={<InventoryPage />} />
+            <Route path="medicines" element={<MedicinesPage />} />
+            <Route path="purchases" element={<PurchasesPage />} />
+            <Route path="customers" element={<CustomersPage />} />
+            <Route path="suppliers" element={<SuppliersPage />} />
+            <Route path="prescriptions" element={<PrescriptionsPage />} />
+            <Route path="returns" element={<ReturnsPage />} />
+            <Route path="expenses" element={<ExpensesPage />} />
+            <Route path="reports" element={<ReportsPage />} />
+            <Route path="employees" element={<EmployeesPage />} />
+            <Route path="settings" element={<SettingsPage />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Route>
         </Route>
       </Routes>
     </BrowserRouter>

@@ -4,15 +4,17 @@ import { purchaseService } from '../services/purchaseService';
 import { supplierService } from '../services/supplierService';
 import { medicineService } from '../services/medicineService';
 import { PurchaseOrder, Supplier, Medicine, PurchaseOrderItem } from '../types';
+import { ApiError } from '../api/client';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { Badge } from '../components/ui/Badge';
 import { Modal } from '../components/ui/Modal';
-import { 
-  Search, 
-  Plus, 
-  Eye, 
-  Trash2
+import {
+  Search,
+  Plus,
+  Eye,
+  Trash2,
+  Loader2
 } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import { formatINR, formatDate } from '../utils/formatters';
@@ -26,17 +28,22 @@ export const PurchasesPage: React.FC = () => {
   const [medicines, setMedicines] = useState<Medicine[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('All');
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Create PO modal state
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [selectedPO, setSelectedPO] = useState<PurchaseOrder | null>(null);
 
-  // New PO form state
+  // New PO form state. Backend status values are 'Ordered' | 'Received' |
+  // 'Cancelled' (no 'Pending') — the form keeps the old "Pending" label for
+  // an unreceived draft PO but the underlying value is 'Ordered'.
   const [poSupplierId, setPoSupplierId] = useState('');
   const [poInvoiceNo, setPoInvoiceNo] = useState('');
   const [poOrderDate, setPoOrderDate] = useState(new Date().toISOString().split('T')[0]);
   const [poExpectedDate, setPoExpectedDate] = useState('');
-  const [poStatus, setPoStatus] = useState<'Pending' | 'Received'>('Received');
+  const [poStatus, setPoStatus] = useState<'Ordered' | 'Received'>('Received');
   const [poItems, setPoItems] = useState<PurchaseOrderItem[]>([]);
 
   // Item row helper
@@ -48,6 +55,7 @@ export const PurchasesPage: React.FC = () => {
   const [itemFreeQty, setItemFreeQty] = useState('0');
   const [itemPurchasePrice, setItemPurchasePrice] = useState('120.00');
   const [itemMrp, setItemMrp] = useState('190.00');
+  const [itemSellingPrice, setItemSellingPrice] = useState('175.00');
   const [itemGst, setItemGst] = useState('12');
 
   useEffect(() => {
@@ -64,25 +72,34 @@ export const PurchasesPage: React.FC = () => {
   }, []);
 
   const loadData = async () => {
-    const [purchList, supList, medList] = await Promise.all([
-      purchaseService.getAll(),
-      supplierService.getAll(),
-      medicineService.getAll()
-    ]);
-    setPurchases(purchList);
-    setSuppliers(supList);
-    setMedicines(medList);
-    if (supList.length > 0) setPoSupplierId(supList[0].id);
-    
-    const initialMedId = searchParams.get('medId') || (medList.length > 0 ? medList[0].id : '');
-    if (initialMedId) {
-      setSelectedMedId(initialMedId);
-      const found = medList.find(m => m.id === initialMedId);
-      if (found) {
-        setItemPurchasePrice(found.purchasePrice.toString());
-        setItemMrp(found.mrp.toString());
-        setItemGst(found.gstRate.toString());
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      const [purchList, supList, medList] = await Promise.all([
+        purchaseService.getAll(),
+        supplierService.getAll(),
+        medicineService.getAll()
+      ]);
+      setPurchases(purchList);
+      setSuppliers(supList);
+      setMedicines(medList);
+      if (supList.length > 0) setPoSupplierId(supList[0].id);
+
+      const initialMedId = searchParams.get('medId') || (medList.length > 0 ? medList[0].id : '');
+      if (initialMedId) {
+        setSelectedMedId(initialMedId);
+        const found = medList.find(m => m.id === initialMedId);
+        if (found) {
+          setItemPurchasePrice(found.purchasePrice.toString());
+          setItemMrp(found.mrp.toString());
+          setItemSellingPrice(found.sellingPrice.toString());
+          setItemGst(found.gstRate.toString());
+        }
       }
+    } catch (err) {
+      setLoadError(err instanceof ApiError ? err.message : 'Failed to load purchases data.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -101,8 +118,22 @@ export const PurchasesPage: React.FC = () => {
     const freeQty = parseInt(itemFreeQty) || 0;
     const pPrice = parseFloat(itemPurchasePrice) || 0;
     const mrp = parseFloat(itemMrp) || 0;
+    const sellingPrice = parseFloat(itemSellingPrice) || 0;
     const gstRate = parseFloat(itemGst) || 12;
 
+    if (sellingPrice > mrp) {
+      addToast({
+        type: 'error',
+        title: 'Invalid Selling Price',
+        message: 'Selling price cannot exceed MRP.'
+      });
+      return;
+    }
+
+    // Locally computed for the pre-submission preview table only — the
+    // server recomputes tax/total authoritatively from purchasePrice/
+    // discountPercent/taxRate when the PO is actually submitted (see
+    // purchaseService.create / server purchaseService.ts computeLineCharge).
     const subtotal = qty * pPrice;
     const taxAmount = (subtotal * gstRate) / 100;
     const total = subtotal + taxAmount;
@@ -117,6 +148,7 @@ export const PurchasesPage: React.FC = () => {
       freeQuantity: freeQty,
       purchasePrice: pPrice,
       mrp,
+      sellingPrice,
       discountPercent: 0,
       taxRate: gstRate,
       taxAmount,
@@ -138,6 +170,7 @@ export const PurchasesPage: React.FC = () => {
 
   const handleCreatePO = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     if (poItems.length === 0) {
       addToast({
         type: 'error',
@@ -147,40 +180,59 @@ export const PurchasesPage: React.FC = () => {
       return;
     }
 
-    const sup = suppliers.find(s => s.id === poSupplierId);
-    const subtotal = poItems.reduce((sum, item) => sum + item.quantity * item.purchasePrice, 0);
-    const taxTotal = poItems.reduce((sum, item) => sum + item.taxAmount, 0);
-    const grandTotal = subtotal + taxTotal;
+    setIsSubmitting(true);
+    try {
+      // Server recomputes taxAmount/total/subtotal/taxTotal/grandTotal/
+      // paymentStatus itself (see purchaseService.ts) — only the raw inputs
+      // per line are sent, not this page's local preview figures.
+      const created = await purchaseService.create({
+        invoiceNumber: poInvoiceNo.trim() || `PINV-${Date.now().toString().slice(-6)}`,
+        supplierId: poSupplierId,
+        orderDate: poOrderDate,
+        expectedDeliveryDate: poExpectedDate || undefined,
+        status: poStatus,
+        items: poItems.map((item) => ({
+          medicineId: item.medicineId,
+          medicineName: item.medicineName,
+          batchNumber: item.batchNumber,
+          mfgDate: item.mfgDate,
+          expiryDate: item.expiryDate,
+          quantity: item.quantity,
+          freeQuantity: item.freeQuantity,
+          purchasePrice: item.purchasePrice,
+          mrp: item.mrp,
+          sellingPrice: item.sellingPrice,
+          taxRate: item.taxRate,
+          discountPercent: item.discountPercent
+        })),
+        paidAmount: 0,
+        notes: 'Inward shipment processed by inventory department'
+      });
 
-    const created = await purchaseService.create({
-      invoiceNumber: poInvoiceNo.trim() || `PINV-${Date.now().toString().slice(-6)}`,
-      supplierId: poSupplierId,
-      supplierName: sup ? sup.name : 'Wholesale Supplier',
-      orderDate: poOrderDate,
-      deliveryDate: poExpectedDate || poOrderDate,
-      expectedDeliveryDate: poExpectedDate || poOrderDate,
-      receivedDate: poStatus === 'Received' ? new Date().toISOString().split('T')[0] : undefined,
-      status: poStatus,
-      paymentStatus: 'Pending',
-      items: poItems,
-      subtotal,
-      discountTotal: 0,
-      taxTotal,
-      grandTotal,
-      paidAmount: 0,
-      notes: `Inward shipment processed by inventory department`
-    });
+      addToast({
+        type: 'success',
+        title: 'Purchase Order Saved',
+        message: `${created.invoiceNumber} recorded.${created.status === 'Received' ? ' Stock automatically updated.' : ''}`
+      });
 
-    addToast({
-      type: 'success',
-      title: 'Purchase Order Saved',
-      message: `${created.invoiceNumber} recorded. Stock automatically updated.`
-    });
-
-    setIsCreateOpen(false);
-    setPoItems([]);
-    setPoInvoiceNo('');
-    loadData();
+      setIsCreateOpen(false);
+      setPoItems([]);
+      setPoInvoiceNo('');
+      loadData();
+    } catch (err) {
+      const isDuplicateInvoice = err instanceof ApiError && err.code === 'DUPLICATE_RESOURCE';
+      addToast({
+        type: 'error',
+        title: isDuplicateInvoice ? 'Duplicate Supplier Invoice' : 'Purchase Order Not Saved',
+        message: isDuplicateInvoice
+          ? 'This supplier invoice number has already been recorded — check the Purchases list before re-entering it.'
+          : err instanceof ApiError
+            ? err.message
+            : 'Failed to save the purchase order.'
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const filteredPurchases = purchases.filter(p => {
@@ -264,12 +316,25 @@ export const PurchasesPage: React.FC = () => {
         >
           <option value="All">All Inward Statuses</option>
           <option value="Received">Received (Stock Added)</option>
-          <option value="Pending">Pending Delivery</option>
+          <option value="Ordered">Pending Delivery</option>
+          <option value="Cancelled">Cancelled</option>
         </select>
       </div>
 
       {/* Purchases Table */}
       <div className="rounded-xl border border-slate-200 bg-white overflow-hidden shadow-2xs">
+        {loadError ? (
+          <div className="p-6 text-center text-xs text-rose-600">
+            {loadError}{' '}
+            <button className="underline font-semibold" onClick={loadData}>Retry</button>
+          </div>
+        ) : isLoading ? (
+          <div className="p-10 flex items-center justify-center text-slate-400">
+            <Loader2 className="w-5 h-5 animate-spin" />
+          </div>
+        ) : filteredPurchases.length === 0 ? (
+          <div className="p-10 text-center text-xs text-slate-400">No purchase orders match your search.</div>
+        ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
@@ -295,7 +360,7 @@ export const PurchasesPage: React.FC = () => {
                   </td>
                   <td className="py-2.5 px-3.5 font-mono text-slate-500">{formatDate(po.orderDate)}</td>
                   <td className="py-2.5 px-3.5">
-                    <Badge variant={po.status === 'Received' ? 'success' : 'warning'} size="sm">
+                    <Badge variant={po.status === 'Received' ? 'success' : po.status === 'Cancelled' ? 'danger' : 'warning'} size="sm">
                       {po.status}
                     </Badge>
                   </td>
@@ -323,6 +388,7 @@ export const PurchasesPage: React.FC = () => {
             </tbody>
           </table>
         </div>
+        )}
       </div>
 
       {/* New Purchase Inward Modal */}
@@ -365,11 +431,11 @@ export const PurchasesPage: React.FC = () => {
               </label>
               <select
                 value={poStatus}
-                onChange={(e) => setPoStatus(e.target.value as 'Pending' | 'Received')}
+                onChange={(e) => setPoStatus(e.target.value as 'Ordered' | 'Received')}
                 className="w-full h-9 px-2.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-700"
               >
                 <option value="Received">Received (Add Stock Now)</option>
-                <option value="Pending">Pending (Draft PO)</option>
+                <option value="Ordered">Pending (Draft PO)</option>
               </select>
             </div>
           </div>
@@ -443,6 +509,15 @@ export const PurchasesPage: React.FC = () => {
                 onChange={(e) => setItemMrp(e.target.value)}
                 className="h-8 text-xs font-mono"
               />
+
+              <Input
+                label="Selling Price (₹)"
+                type="number"
+                step="any"
+                value={itemSellingPrice}
+                onChange={(e) => setItemSellingPrice(e.target.value)}
+                className="h-8 text-xs font-mono"
+              />
             </div>
 
             <div className="flex justify-end pt-1">
@@ -504,10 +579,10 @@ export const PurchasesPage: React.FC = () => {
               Total Inward Items: <span className="font-semibold">{poItems.length}</span>
             </div>
             <div className="flex items-center gap-2">
-              <Button type="button" variant="outline" size="sm" onClick={() => setIsCreateOpen(false)}>
+              <Button type="button" variant="outline" size="sm" onClick={() => setIsCreateOpen(false)} disabled={isSubmitting}>
                 Cancel
               </Button>
-              <Button type="submit" variant="primary" size="sm">
+              <Button type="submit" variant="primary" size="sm" isLoading={isSubmitting}>
                 Save & Inward Stock
               </Button>
             </div>
@@ -532,7 +607,7 @@ export const PurchasesPage: React.FC = () => {
               </div>
               <div>
                 <span className="text-slate-500">Delivery Status:</span>
-                <div className="mt-0.5"><Badge variant={selectedPO.status === 'Received' ? 'success' : 'warning'} size="sm">{selectedPO.status}</Badge></div>
+                <div className="mt-0.5"><Badge variant={selectedPO.status === 'Received' ? 'success' : selectedPO.status === 'Cancelled' ? 'danger' : 'warning'} size="sm">{selectedPO.status}</Badge></div>
               </div>
             </div>
 
