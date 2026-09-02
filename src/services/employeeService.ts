@@ -1,46 +1,39 @@
-import { Employee, Permission } from '../types';
-import { initialEmployees } from '../data/employees';
+import { Employee } from '../types';
+import * as employeesApi from '../api/employees';
+import { Pagination } from '../api/client';
 
-const STORAGE_KEY = 'pharmapos_employees_v1';
-
+/**
+ * Phase K batch 5: backed by the real API — no parallel localStorage staff
+ * directory. Creating/editing an Employee here manages the staff profile
+ * only; it does not create or touch login credentials (see server-side
+ * employee.validators.ts comment) — that remains a separate, not-yet-built
+ * onboarding flow, matching the original frontend's scope exactly.
+ */
 class EmployeeService {
-  private employees: Employee[];
-
-  constructor() {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    this.employees = saved ? JSON.parse(saved) : initialEmployees;
-  }
-
-  private persist() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.employees));
-  }
-
+  /** Capped at the backend's max page size (100) — see medicineService's identical, already-flagged limitation. */
   async getAll(): Promise<Employee[]> {
-    return [...this.employees];
+    const { items } = await employeesApi.listEmployees({ limit: 100 });
+    return items;
+  }
+
+  async list(params: employeesApi.ListEmployeesParams = {}): Promise<{ items: Employee[]; pagination: Pagination }> {
+    return employeesApi.listEmployees(params);
   }
 
   async getById(id: string): Promise<Employee | undefined> {
-    return this.employees.find(e => e.id === id);
+    try {
+      return await employeesApi.getEmployeeById(id);
+    } catch {
+      return undefined;
+    }
   }
 
-  async create(data: Omit<Employee, 'id' | 'lastActive' | 'joinedDate'>): Promise<Employee> {
-    const newEmp: Employee = {
-      ...data,
-      id: `emp-${Date.now()}`,
-      lastActive: 'Never',
-      joinedDate: new Date().toISOString().split('T')[0]
-    };
-    this.employees.push(newEmp);
-    this.persist();
-    return newEmp;
+  async create(input: employeesApi.CreateEmployeeRequest): Promise<Employee> {
+    return employeesApi.createEmployee(input);
   }
 
-  async update(id: string, updates: Partial<Employee>): Promise<Employee> {
-    const index = this.employees.findIndex(e => e.id === id);
-    if (index === -1) throw new Error('Employee not found');
-    this.employees[index] = { ...this.employees[index], ...updates };
-    this.persist();
-    return this.employees[index];
+  async update(id: string, updates: employeesApi.UpdateEmployeeRequest): Promise<Employee> {
+    return employeesApi.updateEmployee(id, updates);
   }
 }
 

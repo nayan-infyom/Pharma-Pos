@@ -1,89 +1,78 @@
 import { PurchaseOrder } from '../types';
-import { initialPurchases } from '../data/purchases';
-import { medicineService } from './medicineService';
-import { inventoryService } from './inventoryService';
+import * as purchasesApi from '../api/purchases';
+import { Pagination } from '../api/client';
 
-const STORAGE_KEY = 'pharmapos_purchases_v1';
+/**
+ * Payload shape changed materially here, same category of change as
+ * salesService.createSale (Phase K checkpoint): the old create() took an
+ * ALREADY-FULLY-PRICED PurchaseOrder (taxAmount/total per line, subtotal/
+ * taxTotal/grandTotal precomputed client-side, plus the dropped 92%-of-MRP
+ * auto-margin default for sellingPrice) and just persisted it + mutated
+ * stock as a side effect via medicineService.addStock/addBatch. The backend
+ * now computes all pricing itself (resolved decision #2: no hardcoded
+ * margin — sellingPrice is a required, explicit per-batch input) and
+ * resolves stock/ledger/movement writes inside one transaction. This is a
+ * genuine frontend/backend contract change, not an internals-only adapter —
+ * PurchasesPage's call site was updated accordingly (see batch report).
+ */
+export interface CreatePurchaseItemInput {
+  medicineId: string;
+  medicineName: string;
+  batchNumber: string;
+  mfgDate: string;
+  expiryDate: string;
+  quantity: number;
+  freeQuantity?: number;
+  purchasePrice: number;
+  mrp: number;
+  sellingPrice: number;
+  taxRate: number;
+  discountPercent?: number;
+}
+
+export interface CreatePurchaseInput {
+  supplierId: string;
+  invoiceNumber: string;
+  orderDate?: string;
+  expectedDeliveryDate?: string;
+  items: CreatePurchaseItemInput[];
+  paidAmount?: number;
+  status?: 'Received' | 'Ordered' | 'Cancelled';
+  notes?: string;
+}
+
+function generateIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
 class PurchaseService {
-  private purchases: PurchaseOrder[];
-
-  constructor() {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        this.purchases = JSON.parse(saved);
-      } catch (e) {
-        this.purchases = initialPurchases;
-      }
-    } else {
-      this.purchases = initialPurchases;
-      this.persist();
-    }
-  }
-
-  private persist() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(this.purchases));
-  }
-
+  /** Capped at the backend's max page size (100) — see medicineService's identical, already-flagged limitation. */
   async getAll(): Promise<PurchaseOrder[]> {
-    return [...this.purchases];
+    const { items } = await purchasesApi.listPurchases({ limit: 100 });
+    return items;
+  }
+
+  async list(params: purchasesApi.ListPurchasesParams = {}): Promise<{ items: PurchaseOrder[]; pagination: Pagination }> {
+    return purchasesApi.listPurchases(params);
   }
 
   async getById(id: string): Promise<PurchaseOrder | undefined> {
-    return this.purchases.find(p => p.id === id);
+    try {
+      return await purchasesApi.getPurchaseById(id);
+    } catch {
+      return undefined;
+    }
   }
 
-  async create(orderData: Omit<PurchaseOrder, 'id'>): Promise<PurchaseOrder> {
-    const newOrder: PurchaseOrder = {
-      ...orderData,
-      id: `po-${Date.now()}`
-    };
+  /** No dedicated lookup-by-invoice-number endpoint — same pattern/limitation as salesService.getByInvoiceNumber. */
+  async getByInvoiceNumber(invNum: string): Promise<PurchaseOrder | undefined> {
+    const { items } = await purchasesApi.listPurchases({ limit: 100 });
+    return items.find((p) => p.invoiceNumber.toLowerCase() === invNum.toLowerCase());
+  }
 
-    // If marked received, add stock to batch or create batch
-    if (newOrder.status === 'Received') {
-      for (const item of newOrder.items) {
-        const totalQty = item.quantity + (item.freeQuantity || 0);
-        const med = await medicineService.getById(item.medicineId);
-        if (med) {
-          const existingBatch = med.batches.find(b => b.batchNumber === item.batchNumber);
-          if (existingBatch) {
-            await medicineService.addStock(item.medicineId, existingBatch.id, totalQty);
-          } else {
-            await medicineService.addBatch(item.medicineId, {
-              batchNumber: item.batchNumber,
-              supplierId: newOrder.supplierId,
-              supplierName: newOrder.supplierName,
-              quantity: totalQty,
-              purchasePrice: item.purchasePrice,
-              mrp: item.mrp,
-              sellingPrice: Math.round(item.mrp * 0.92),
-              mfgDate: item.mfgDate,
-              expiryDate: item.expiryDate,
-              status: 'Active',
-              rackLocation: 'Main Storage'
-            });
-          }
-
-          await inventoryService.recordMovement({
-            medicineId: item.medicineId,
-            medicineName: item.medicineName,
-            batchNumber: item.batchNumber,
-            type: 'Purchase',
-            quantityChange: totalQty,
-            previousStock: med.totalStock,
-            newStock: med.totalStock + totalQty,
-            user: 'Purchase Manager',
-            referenceId: newOrder.invoiceNumber,
-            notes: `Inward Purchase from ${newOrder.supplierName}`
-          });
-        }
-      }
-    }
-
-    this.purchases.unshift(newOrder);
-    this.persist();
-    return newOrder;
+  async create(input: CreatePurchaseInput): Promise<PurchaseOrder> {
+    return purchasesApi.createPurchase({ ...input, idempotencyKey: generateIdempotencyKey() });
   }
 }
 

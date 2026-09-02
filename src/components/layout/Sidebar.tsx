@@ -29,6 +29,7 @@ interface NavSection {
     icon: React.ReactNode;
     badge?: string | number;
     badgeVariant?: 'live' | 'warning' | 'info';
+    requiredPermission?: string;
   }[];
 }
 
@@ -42,7 +43,7 @@ export const Sidebar: React.FC = () => {
   } = useAppStore();
   const location = useLocation();
 
-  const navSections: NavSection[] = [
+  const allNavSections: NavSection[] = [
     {
       title: 'OVERVIEW',
       items: [
@@ -83,11 +84,19 @@ export const Sidebar: React.FC = () => {
     {
       title: 'ADMINISTRATION',
       items: [
-        { name: 'Staff & Roles', path: '/employees', icon: <UserCheck className="w-4 h-4" /> },
-        { name: 'Settings', path: '/settings', icon: <Settings className="w-4 h-4" /> }
+        { name: 'Staff & Roles', path: '/employees', icon: <UserCheck className="w-4 h-4" />, requiredPermission: 'manage_employees' },
+        { name: 'Settings', path: '/settings', icon: <Settings className="w-4 h-4" />, requiredPermission: 'manage_settings' }
       ]
     }
   ];
+
+  // Cosmetic only (server RBAC is the real gate — see employee.route.ts /
+  // settings.route.ts) — these two links used to show for every logged-in
+  // user regardless of role and 403 on load; hiding what a role can't use
+  // avoids that dead-end click, it doesn't replace the backend check.
+  const navSections: NavSection[] = allNavSections
+    .map((section) => ({ ...section, items: section.items.filter((item) => !item.requiredPermission || currentUser.permissions.includes(item.requiredPermission)) }))
+    .filter((section) => section.items.length > 0);
 
   const sidebarContent = (
     <div className="flex flex-col h-full bg-white border-r border-slate-200 select-none">
