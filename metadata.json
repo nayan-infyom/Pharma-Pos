@@ -1,0 +1,6 @@
+{
+  "name": "PharmaPOS - Pharmacy Point of Sale & Management System",
+  "description": "High-performance pharmacy POS and inventory management system with fast billing, batch tracking, FEFO dispatch, expiry alerts, and detailed pharmacy analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
